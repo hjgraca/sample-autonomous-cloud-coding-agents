@@ -51,29 +51,25 @@ class TestWorkflowResolution:
         assert config.policy_principal == "new_task"
         assert config.is_pr_workflow is False
 
-    def test_haiku_model_defaults_to_inference_profile(self, monkeypatch):
-        # No override, no env → platform default, which must be a us.* inference
-        # profile (Claude 4.x can't be invoked on-demand by bare model id).
-        monkeypatch.delenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", raising=False)
+    def test_model_defaults_to_inference_profile(self, monkeypatch):
+        monkeypatch.delenv("MODEL_ID", raising=False)
         config = build_config(
             repo_url="owner/repo",
             task_description="fix bug",
             github_token="ghp_test123",
             aws_region="us-east-1",
         )
-        assert config.haiku_model == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        assert config.model_id == "us.anthropic.claude-opus-4-8"
 
-    def test_haiku_model_resolves_from_env(self, monkeypatch):
-        # The deployed ANTHROPIC_DEFAULT_HAIKU_MODEL (set by agent.ts) flows
-        # through config rather than being hardcoded in the runner.
-        monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-x")
+    def test_model_resolves_from_env(self, monkeypatch):
+        monkeypatch.setenv("MODEL_ID", "us.anthropic.claude-sonnet-4-6")
         config = build_config(
             repo_url="owner/repo",
             task_description="fix bug",
             github_token="ghp_test123",
             aws_region="us-east-1",
         )
-        assert config.haiku_model == "us.anthropic.claude-haiku-x"
+        assert config.model_id == "us.anthropic.claude-sonnet-4-6"
 
     def test_pr_iteration_workflow_requires_pr_number(self):
         with pytest.raises(ValueError, match="pr_number is required"):

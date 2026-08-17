@@ -47,7 +47,7 @@ def _server_key(asset: dict[str, Any]) -> str:
 
 def _to_mcp_config(runtime: dict[str, Any], server_key: str) -> dict[str, Any]:
     """Normalize a registry mcp_server runtime payload into the ``.mcp.json``
-    entry shape the Claude Agent SDK actually consumes.
+    entry shape the runtime MCP loader consumes.
 
     The registry contract names the discriminant ``transport`` (``http`` / ``sse``
     / ``stdio``), but the SDK's ``McpServerConfig`` (and the existing

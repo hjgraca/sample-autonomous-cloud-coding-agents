@@ -25,19 +25,18 @@ class TestBuildGatewayServer:
     def test_returns_none_when_gateway_url_unset(self, monkeypatch):
         # Feature off (no --context enableToolGateway=true) → nothing offered.
         monkeypatch.delenv(gw.GATEWAY_URL_ENV, raising=False)
-        assert gw.build_gateway_server() is None
+        assert gw.build_gateway_tool() is None
 
     def test_returns_none_when_gateway_url_blank(self, monkeypatch):
         monkeypatch.setenv(gw.GATEWAY_URL_ENV, "   ")
-        assert gw.build_gateway_server() is None
+        assert gw.build_gateway_tool() is None
 
-    def test_builds_sdk_server_when_url_present(self, monkeypatch):
+    def test_builds_strands_tool_when_url_present(self, monkeypatch):
         monkeypatch.setenv(gw.GATEWAY_URL_ENV, "https://gw.example/mcp")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
-        server = gw.build_gateway_server()
-        assert server is not None
-        assert server["type"] == "sdk"
-        assert server["name"] == gw.GATEWAY_SERVER_NAME
+        gateway_tool = gw.build_gateway_tool()
+        assert gateway_tool is not None
+        assert gateway_tool.tool_name == gw.GATEWAY_TOOL_NAME
 
     def test_falls_back_to_aws_default_region(self, monkeypatch):
         # AWS_DEFAULT_REGION-only is a common Lambda/ECS combination; the bridge
@@ -45,9 +44,9 @@ class TestBuildGatewayServer:
         monkeypatch.setenv(gw.GATEWAY_URL_ENV, "https://gw.example/mcp")
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
-        server = gw.build_gateway_server()
-        assert server is not None
-        assert server["name"] == gw.GATEWAY_SERVER_NAME
+        gateway_tool = gw.build_gateway_tool()
+        assert gateway_tool is not None
+        assert gateway_tool.tool_name == gw.GATEWAY_TOOL_NAME
 
     def test_returns_none_and_warns_when_url_set_but_no_region(self, monkeypatch, capfd):
         # N3 region guard: URL set (feature opted in) but no region resolvable is
@@ -56,13 +55,13 @@ class TestBuildGatewayServer:
         monkeypatch.setenv(gw.GATEWAY_URL_ENV, "https://gw.example/mcp")
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
-        assert gw.build_gateway_server() is None
+        assert gw.build_gateway_tool() is None
         assert "no AWS region is resolvable" in capfd.readouterr().out
 
     def test_server_name_is_neutral_no_linear(self):
         # The scrubber strip_linear_mcp_servers deletes any entry containing
         # "linear"; the federated bridge must never collide with that marker.
-        assert "linear" not in gw.GATEWAY_SERVER_NAME.lower()
+        assert "linear" not in gw.GATEWAY_TOOL_NAME.lower()
 
 
 class TestRepoConfigImpl:

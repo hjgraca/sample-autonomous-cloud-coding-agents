@@ -74,7 +74,7 @@ class ModelPreference(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    """Everything that shapes the Claude Agent SDK session for this task type.
+    """Everything that shapes the agent harness session for this task type.
 
     Asset kinds mirror the #246 registry vocabulary. ``tier`` and
     ``allowed_tools`` are interpreted by the runner in Phases 1-3; the
@@ -102,7 +102,7 @@ class RepoConfig(BaseModel):
 
     ``provider`` is a VCS abstraction (``github`` is the only implemented
     backend today); ``discover``/``ignore`` gate config discovered from the
-    cloned repo (``CLAUDE.md``, ``.claude/``, ``.mcp.json``).
+    cloned repo (``AGENTS.md``/``.agents``, legacy Claude files, ``.mcp.json``).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

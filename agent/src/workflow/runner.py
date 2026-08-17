@@ -442,7 +442,7 @@ def _handle_hydrate_context(step: Step, ctx: StepContext) -> StepOutcome:
 
 
 def _handle_run_agent(step: Step, ctx: StepContext) -> StepOutcome:
-    """Run the one Claude Agent SDK loop for this workflow.
+    """Run the workflow's single autonomous agent loop.
 
     ``run_agent`` is async; the runner is sync (matching ``pipeline.run_task``),
     so the loop is driven via ``asyncio.run`` here exactly as the pipeline does

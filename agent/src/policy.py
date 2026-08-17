@@ -156,7 +156,7 @@ class Outcome(StrEnum):
 
     REQUIRE_APPROVAL is the soft-deny surface: the hook pauses the tool call
     and awaits a human decision. ALLOW / DENY are absolute from the engine's
-    perspective — the hook maps them to the SDK's binary permit/forbid API.
+    perspective; the Strands adapter maps them to execute/cancel.
     """
 
     ALLOW = "allow"

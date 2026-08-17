@@ -1,463 +1,131 @@
-"""Unit tests for runner.py helpers.
-
-The full ``run_agent`` path is integration-tested via test_pipeline.py
-with a mocked ``pipeline.run_agent``. This module covers the narrower
-``_initialize_policy_engine_and_hooks`` helper extracted in Chunk 7 so
-the policy-engine bootstrap + ``pre_approvals_loaded`` emission can be
-verified without spinning up the Claude Agent SDK client.
-"""
+"""Unit tests for the provider-neutral runner entry point."""
 
 from __future__ import annotations
 
+import asyncio
+import os
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from gateway_tools import GATEWAY_SERVER_NAME
-from models import TaskConfig
+from models import AgentResult, TaskConfig
 from runner import (
-    _DISALLOWED_TOOLS,
     _FULL_TOOL_SURFACE,
-    _initialize_policy_engine_and_hooks,
-    _register_gateway_server,
+    _initialize_policy_engine,
     _resolve_allowed_tools,
-    _resolve_setting_sources,
     _setup_agent_env,
-    _setup_bedrock_cost_attribution,
+    run_agent,
 )
 
 
 def _config(**overrides: Any) -> TaskConfig:
-    # Use an explicitly typed dict so ty can see the heterogenous field
-    # types across the TaskConfig signature (``bool`` for ``dry_run``,
-    # ``int`` for ``max_turns``, etc.) rather than inferring ``dict[str, str]``
-    # from the homogeneous base literal.
-    base: dict[str, Any] = {
+    values: dict[str, Any] = {
         "repo_url": "owner/repo",
         "github_token": "ghp_test",
         "aws_region": "us-east-1",
         "task_id": "t-runner-1",
     }
-    base.update(overrides)
-    return TaskConfig(**base)
+    values.update(overrides)
+    return TaskConfig(**values)
 
 
-class TestInitializePolicyEngineAndHooks:
-    """Bootstrap the per-task PolicyEngine + hooks without the SDK loop.
-
-    Chunk 7 verifies two new behaviors:
-      1. ``initial_approval_gate_count`` from ``TaskConfig`` reaches
-         ``PolicyEngine.__init__`` so a container restart resumes the
-         cumulative gate budget (§13.6).
-      2. ``pre_approvals_loaded`` is emitted to the progress writer
-         right after PolicyEngine init so the live SSE stream reports
-         the starting posture (§4 step 7, §11.1).
-    """
-
-    @patch("hooks.build_hook_matchers")
+class TestInitializePolicyEngine:
     @patch("policy.PolicyEngine")
-    def test_initial_approval_gate_count_threaded_to_engine(
-        self, mock_policy_engine, _mock_build_hooks
-    ):
-        config = _config(initial_approval_gate_count=17)
-        progress = MagicMock()
-
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
-
-        assert mock_policy_engine.called
-        kwargs = mock_policy_engine.call_args.kwargs
-        assert kwargs["initial_approval_gate_count"] == 17
-
-    @patch("hooks.build_hook_matchers")
-    @patch("policy.PolicyEngine")
-    def test_zero_initial_approval_gate_count_omits_kwarg(
-        self, mock_policy_engine, _mock_build_hooks
-    ):
-        # Default path (fresh task, no restart). Helper omits the kwarg
-        # so PolicyEngine falls back to its own default of 0 — avoids
-        # threading 0 explicitly and keeps legacy construction surface.
-        config = _config(initial_approval_gate_count=0)
-        progress = MagicMock()
-
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
-
-        kwargs = mock_policy_engine.call_args.kwargs
-        assert "initial_approval_gate_count" not in kwargs
-
-    @patch("hooks.build_hook_matchers")
-    @patch("policy.PolicyEngine")
-    def test_initial_approvals_and_timeout_threaded(self, mock_policy_engine, _mock_build_hooks):
+    def test_threads_task_policy_configuration(self, policy_engine):
         config = _config(
-            initial_approvals=["tool_type:Read", "rule:force_push_any"],
+            initial_approvals=["tool_type:Read"],
             approval_timeout_s=600,
+            initial_approval_gate_count=17,
+            approval_gate_cap=200,
+            read_only=True,
+            user_id="user-1",
         )
         progress = MagicMock()
 
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
+        engine = _initialize_policy_engine(config=config, progress=progress)
 
-        kwargs = mock_policy_engine.call_args.kwargs
-        assert kwargs["initial_approvals"] == ["tool_type:Read", "rule:force_push_any"]
-        assert kwargs["task_default_timeout_s"] == 600
-
-    @patch("hooks.build_hook_matchers")
-    @patch("policy.PolicyEngine")
-    def test_read_only_threaded_to_engine(self, mock_policy_engine, _mock_build_hooks):
-        # SECURITY (#248 Phase 2a): config.read_only MUST reach
-        # PolicyEngine(read_only=...) — that is the seam between "config computes
-        # read_only" and "Cedar enforces context.read_only". Without this
-        # assertion, dropping the kwarg passes every other test while silently
-        # disabling the Write/Edit hard-deny for read-only workflows.
-        config = _config(read_only=True)
-        progress = MagicMock()
-
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
-
-        assert mock_policy_engine.call_args.kwargs["read_only"] is True
-
-    @patch("hooks.build_hook_matchers")
-    @patch("policy.PolicyEngine")
-    def test_writeable_read_only_false_threaded_to_engine(
-        self, mock_policy_engine, _mock_build_hooks
-    ):
-        config = _config(read_only=False)
-        progress = MagicMock()
-
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
-
-        assert mock_policy_engine.call_args.kwargs["read_only"] is False
-
-    @patch("hooks.build_hook_matchers")
-    @patch("policy.PolicyEngine")
-    def test_pre_approvals_loaded_emitted_with_initial_scopes(
-        self, _mock_policy_engine, _mock_build_hooks
-    ):
-        config = _config(initial_approvals=["tool_type:Read", "all_session"])
-        progress = MagicMock()
-
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
-
+        assert engine is policy_engine.return_value
+        assert policy_engine.call_args.kwargs["read_only"] is True
+        assert policy_engine.call_args.kwargs["initial_approvals"] == ["tool_type:Read"]
+        assert policy_engine.call_args.kwargs["task_default_timeout_s"] == 600
+        assert policy_engine.call_args.kwargs["initial_approval_gate_count"] == 17
+        assert policy_engine.call_args.kwargs["approval_gate_cap"] == 200
         progress.write_approval_pre_approvals_loaded.assert_called_once_with(
-            count=2, scopes=["tool_type:Read", "all_session"]
+            count=1,
+            scopes=["tool_type:Read"],
         )
 
-    @patch("hooks.build_hook_matchers")
     @patch("policy.PolicyEngine")
-    def test_pre_approvals_loaded_emitted_with_zero_count_when_empty(
-        self, _mock_policy_engine, _mock_build_hooks
-    ):
-        # §4 step 7: emit even when no pre-approvals — "no seeded scopes"
-        # must be explicit in the live stream, not inferred from silence.
-        config = _config()
-        progress = MagicMock()
-
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
-
-        progress.write_approval_pre_approvals_loaded.assert_called_once_with(count=0, scopes=[])
-
-    @patch("hooks.build_hook_matchers")
-    @patch("policy.PolicyEngine")
-    def test_user_id_threaded_to_hook_matchers(self, _mock_policy_engine, mock_build_hooks):
-        # E2E regression: a missing user_id on the approval row lands an
-        # empty string on the TaskApprovalsTable ``user_id-status-index``
-        # GSI key, which DynamoDB rejects with ValidationException, and
-        # every approval-gate request fails silently. The hook writer
-        # needs ``user_id`` from the task payload — runner must thread
-        # ``config.user_id`` into ``build_hook_matchers``.
-        config = _config(user_id="cog-sub-0123")
-        progress = MagicMock()
-
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
-
-        kwargs = mock_build_hooks.call_args.kwargs
-        assert kwargs["user_id"] == "cog-sub-0123"
-
-    @patch("hooks.build_hook_matchers")
-    @patch("policy.PolicyEngine")
-    def test_helper_returns_engine_and_hooks(self, mock_policy_engine, mock_build_hooks):
-        engine_instance = MagicMock()
-        hooks_instance = [MagicMock()]
-        mock_policy_engine.return_value = engine_instance
-        mock_build_hooks.return_value = hooks_instance
-
-        engine, hooks = _initialize_policy_engine_and_hooks(
-            config=_config(), trajectory=None, progress=MagicMock()
-        )
-
-        assert engine is engine_instance
-        assert hooks is hooks_instance
-
-    # --- Chunk 7b: approval_gate_cap fanout to PolicyEngine -----------------
-
-    @patch("hooks.build_hook_matchers")
-    @patch("policy.PolicyEngine")
-    def test_approval_gate_cap_threaded_to_engine_when_set(
-        self, mock_policy_engine, _mock_build_hooks
-    ):
-        # Chunk 7b: submit-time-resolved cap on TaskConfig must reach
-        # PolicyEngine so blueprint overrides (or the default-50 frozen
-        # at submit) apply on every container, including restarts.
-        config = _config(approval_gate_cap=200)
-        progress = MagicMock()
-
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
-
-        kwargs = mock_policy_engine.call_args.kwargs
-        assert kwargs["approval_gate_cap"] == 200
-
-    @patch("hooks.build_hook_matchers")
-    @patch("policy.PolicyEngine")
-    def test_approval_gate_cap_omitted_when_none(self, mock_policy_engine, _mock_build_hooks):
-        # Legacy tasks (pre-Chunk-7b) don't carry approval_gate_cap.
-        # Helper must NOT thread None — the engine's default-50
-        # fallback is what makes the legacy behavior preserved.
-        config = _config(approval_gate_cap=None)
-        progress = MagicMock()
-
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=progress)
-
-        kwargs = mock_policy_engine.call_args.kwargs
+    def test_omits_optional_engine_defaults(self, policy_engine):
+        _initialize_policy_engine(config=_config(), progress=MagicMock())
+        kwargs = policy_engine.call_args.kwargs
+        assert "initial_approvals" not in kwargs
+        assert "task_default_timeout_s" not in kwargs
+        assert "initial_approval_gate_count" not in kwargs
         assert "approval_gate_cap" not in kwargs
-
-    # --- Chunk 7c: cap + source surfaced in the init log line ---------------
-
-    @patch("hooks.build_hook_matchers")
-    @patch("policy.PolicyEngine")
-    def test_init_log_includes_cap_and_threaded_source(
-        self, _mock_policy_engine, _mock_build_hooks, capfd
-    ):
-        # Non-None cap came from the orchestrator payload (blueprint value
-        # or the platform-default-50 frozen on the TaskRecord at submit).
-        # Log must surface the value + ``approval_gate_cap_source=threaded``
-        # using the same key name as ``create-task-core.ts`` so
-        # CloudWatch Insights queries can join / filter across both ends
-        # of the cascade without a field-name translation.
-        config = _config(approval_gate_cap=200)
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
-
-        captured = capfd.readouterr()
-        assert "Cedar policy engine initialized" in captured.out
-        assert "approval_gate_cap=200" in captured.out
-        assert "approval_gate_cap_source=threaded" in captured.out
-
-    @patch("hooks.build_hook_matchers")
-    @patch("policy.PolicyEngine")
-    def test_init_log_marks_engine_default_when_cap_none(
-        self, _mock_policy_engine, _mock_build_hooks, capfd
-    ):
-        # Legacy task — cap falls through to ``PolicyEngine``'s own
-        # default. Operator signal is ``approval_gate_cap_source=engine_default``
-        # so a deploy with broken cap-plumbing (e.g. payload field
-        # dropped) is visible in logs as every task reporting
-        # engine_default instead of the expected threaded blueprint
-        # values. ``unset`` (not ``<engine_default>``) for the numeric
-        # value to avoid angle-bracket escaping in log-aggregation
-        # tooling.
-        config = _config(approval_gate_cap=None)
-        _initialize_policy_engine_and_hooks(config=config, trajectory=None, progress=MagicMock())
-
-        captured = capfd.readouterr()
-        assert "approval_gate_cap_source=engine_default" in captured.out
-        assert "approval_gate_cap=unset" in captured.out
 
 
 class TestResolveAllowedTools:
-    """The SDK tool surface (``allowed_tools``) is the second enforcement layer
-    the design promises alongside Cedar's ``context.read_only``. These tests pin
-    the seam between "config carries the workflow tool list" and "the SDK
-    receives it" — previously every allowed_tools assertion lived at the
-    validator/loader layer with zero coverage of the runtime hand-off (#248).
-    """
+    def test_full_surface_maps_to_neutral_names(self):
+        resolved = _resolve_allowed_tools(_config(allowed_tools=[]))
+        assert _FULL_TOOL_SURFACE == ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch"]
+        assert resolved == [
+            "shell",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "glob_files",
+            "search_text",
+            "fetch_url",
+        ]
 
-    def test_workflow_tool_list_passed_through_verbatim(self):
-        # A writeable workflow's declared list reaches the SDK unchanged.
-        config = _config(allowed_tools=["Bash", "Read", "Write", "Edit"], read_only=False)
-        assert _resolve_allowed_tools(config) == ["Bash", "Read", "Write", "Edit"]
+    def test_read_only_removes_mutating_tools(self):
+        config = _config(
+            allowed_tools=["Bash", "Read", "Write", "Edit", "Glob"],
+            read_only=True,
+        )
+        assert _resolve_allowed_tools(config) == ["shell", "read_file", "glob_files"]
 
-    def test_empty_list_falls_back_to_full_surface(self):
-        # Legacy/batch callers that never resolved a workflow get the built-in
-        # full surface (preserves pre-#248 behavior). A copy, not the shared list.
-        config = _config(allowed_tools=[], read_only=False)
-        resolved = _resolve_allowed_tools(config)
-        assert resolved == _FULL_TOOL_SURFACE
-        assert resolved is not _FULL_TOOL_SURFACE
-
-    def test_read_only_drops_write_and_edit_from_full_surface(self):
-        # read_only with no explicit list: full surface minus Write/Edit.
-        config = _config(allowed_tools=[], read_only=True)
-        resolved = _resolve_allowed_tools(config)
-        assert "Write" not in resolved
-        assert "Edit" not in resolved
-        assert resolved == ["Bash", "Read", "Glob", "Grep", "WebFetch"]
-
-    def test_read_only_drops_write_and_edit_from_workflow_list(self):
-        # Even if a (misconfigured) read-only workflow declares Write/Edit, the
-        # runner strips them — the SDK can never receive a mutating tool on a
-        # read-only lane. This is the defense-in-depth the HIGH finding flagged.
-        config = _config(allowed_tools=["Bash", "Read", "Write", "Edit"], read_only=True)
-        assert _resolve_allowed_tools(config) == ["Bash", "Read"]
-
-    def test_read_leaning_default_lane_keeps_its_restricted_list(self):
-        # default/agent-v1 and web-research-v1 declare [Read, Glob, Grep,
-        # WebFetch] and are read_only:false — Cedar's read_only rules do NOT
-        # fire, so the tool list is the ONLY thing keeping Write/Bash off the
-        # lane. Verify the restricted list survives intact (no fallback widening).
-        restricted = ["Read", "Glob", "Grep", "WebFetch"]
-        config = _config(allowed_tools=list(restricted), read_only=False)
-        assert _resolve_allowed_tools(config) == restricted
-        assert "Bash" not in _resolve_allowed_tools(config)
-        assert "Write" not in _resolve_allowed_tools(config)
+    def test_restricted_workflow_is_not_widened(self):
+        config = _config(allowed_tools=["Read", "Glob", "Grep", "WebFetch"])
+        assert _resolve_allowed_tools(config) == [
+            "read_file",
+            "glob_files",
+            "search_text",
+            "fetch_url",
+        ]
 
 
-class TestBedrockCostAttribution:
-    """#215: wire Claude Code's Bedrock attribution channels (creds + header)."""
+def test_setup_agent_env_sets_shared_env(monkeypatch):
+    _setup_agent_env(_config(model_id="us.anthropic.claude-opus-4-8"))
 
-    def test_writes_attribution_file_and_sets_metadata_header_when_role_set(self, monkeypatch):
-        monkeypatch.setenv("AGENT_SESSION_ROLE_ARN", "arn:aws:iam::1:role/SR")
-        monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
-        config = _config(user_id="alice", repo_url="owner/repo", task_id="t-9")
+    assert os.environ["AWS_REGION"] == "us-east-1"
+    assert os.environ["GH_TOKEN"] == _config().github_token
 
-        with patch("bedrock_creds_helper.write_attribution_file") as mock_write:
-            _setup_bedrock_cost_attribution(config)
 
-        role_arn, tags = mock_write.call_args.args
-        assert role_arn == "arn:aws:iam::1:role/SR"
-        assert {"Key": "user_id", "Value": "alice"} in tags
+def test_run_agent_delegates_through_harness_boundary():
+    expected = AgentResult(status="end_turn", turns=1)
+    harness = MagicMock()
+    harness.run = AsyncMock(return_value=expected)
 
-        header = __import__("os").environ["ANTHROPIC_CUSTOM_HEADERS"]
-        name, _, value = header.partition(": ")
-        assert name == "X-Amzn-Bedrock-Request-Metadata"
-        import json as _json
-
-        assert _json.loads(value) == {
-            "user_id": "alice",
-            "repo": "owner/repo",
-            "task_id": "t-9",
-        }
-
-    def test_no_attribution_file_when_role_unset_but_header_still_set(self, monkeypatch):
-        # Local/dev: no SessionRole → no tagged creds (helper fails open), but the
-        # invocation-log metadata header is still useful and harmless.
-        monkeypatch.delenv("AGENT_SESSION_ROLE_ARN", raising=False)
-        config = _config(user_id="bob", repo_url="o/r", task_id="t-1")
-        with patch("bedrock_creds_helper.write_attribution_file") as mock_write:
-            _setup_bedrock_cost_attribution(config)
-        mock_write.assert_not_called()
-        assert "X-Amzn-Bedrock-Request-Metadata" in __import__("os").environ.get(
-            "ANTHROPIC_CUSTOM_HEADERS", ""
+    with (
+        patch("runner._build_harness", return_value=harness),
+        patch("runner._initialize_policy_engine", return_value=MagicMock()),
+        patch("runner._ProgressWriter"),
+        patch("runner._TrajectoryWriter"),
+    ):
+        result = asyncio.run(
+            run_agent(
+                "do work",
+                "system",
+                _config(allowed_tools=["Read"]),
+                cwd="/tmp/repo",
+            )
         )
 
-
-class TestToolSurfaceHardening:
-    """The off-session/defer vectors are hard-blocked via disallowed_tools (not
-    the allow-list, which is auto-approve only), and repo-less tasks load no
-    on-disk settings. Regression guard for the background-Workflow bug where a
-    repo-less task launched a detached Workflow and finalized prematurely."""
-
-    def test_workflow_task_agent_are_disallowed(self):
-        # These must be present so they are removed from the model's context
-        # even under permission_mode="bypassPermissions".
-        assert "Workflow" in _DISALLOWED_TOOLS
-        assert "Task" in _DISALLOWED_TOOLS
-        assert "Agent" in _DISALLOWED_TOOLS
-
-    def test_disallowed_tool_set_is_pinned(self):
-        # #523: the block list is hand-enumerated ("name varies by CLI version"),
-        # so a silent drop/rename would reopen the detached-work bug with nothing
-        # to catch it. Pin the exact set — a deliberate change must update this,
-        # forcing a look at whether a renamed off-session tool needs adding.
-        assert set(_DISALLOWED_TOOLS) == {
-            "Workflow",
-            "Task",
-            "Agent",
-            "Monitor",
-            "SendMessage",
-            "CronCreate",
-            "CronDelete",
-            "CronList",
-        }
-
-    def test_repo_less_loads_no_setting_sources(self):
-        # requires_repo=False → no cloned repo → load nothing (keeps stray
-        # on-disk skills that could spawn a background Workflow out of reach).
-        config = _config(requires_repo=False, repo_url="", github_token="")
-        assert _resolve_setting_sources(config) == []
-
-    def test_repo_bound_loads_project_settings(self):
-        config = _config(requires_repo=True)
-        assert _resolve_setting_sources(config) == ["project"]
-
-    def test_repo_optional_with_repo_loads_project_settings(self):
-        # #523: a repo-optional workflow (requires_repo=False) GIVEN a repo takes
-        # the clone path (pipeline gates on `not requires_repo and not repo_url`),
-        # so it must load the cloned repo's ``.claude/`` config. Keying on
-        # requires_repo would wrongly drop it — key on repo presence.
-        config = _config(requires_repo=False, repo_url="owner/repo")
-        assert _resolve_setting_sources(config) == ["project"]
-
-
-class TestSetupAgentEnv:
-    """Environment the Claude Code subprocess inherits."""
-
-    def test_haiku_model_env_is_set_from_config(self, monkeypatch):
-        # The env var is now sourced from config.haiku_model (not hardcoded), so
-        # it is per-task overridable like ANTHROPIC_MODEL. Regression: bare
-        # foundation-model id 400s on Bedrock — WebFetch's Haiku sub-calls hit
-        # this — so config's default must be the us.* inference profile.
-        import os
-
-        # _setup_agent_env writes ANTHROPIC_DEFAULT_HAIKU_MODEL and
-        # CLAUDE_CODE_USE_BEDROCK straight to os.environ. Pre-claim them through
-        # monkeypatch so its teardown restores them and this test can't leak into
-        # order-dependent neighbors (#523).
-        monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
-        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "")
-
-        config = _config(haiku_model="us.anthropic.claude-haiku-4-5-20251001-v1:0")
-        _setup_agent_env(config)
-        assert (
-            os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
-            == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-        )
-
-    def test_config_default_haiku_model_is_an_inference_profile(self):
-        # The platform default (no override) must be a us.* profile, never a bare
-        # foundation-model id — the whole point of the fix.
-        assert _config().haiku_model.startswith("us.")
-
-
-class TestRegisterGatewayServer:
-    """The runner-side wiring that registers the AgentCore Gateway bridge.
-
-    ``gateway_tools`` unit tests cover ``build_gateway_server`` itself; these
-    pin the ``run_agent`` registration path — that a built server lands under
-    ``GATEWAY_SERVER_NAME`` and that a disabled bridge adds nothing (#641 P1
-    review flagged this wiring as untested / N6).
-    """
-
-    def test_registers_built_server_under_gateway_name(self):
-        sentinel = object()
-        with patch("runner.build_gateway_server", return_value=sentinel) as mock_build:
-            mcp_servers: dict[str, Any] = {}
-            _register_gateway_server(mcp_servers)
-        mock_build.assert_called_once_with()
-        assert mcp_servers == {GATEWAY_SERVER_NAME: sentinel}
-
-    def test_no_registration_when_bridge_disabled(self):
-        # build_gateway_server returns None when the feature is off (URL unset)
-        # or the SDK is missing — the runner must then offer no gateway tool.
-        with patch("runner.build_gateway_server", return_value=None):
-            mcp_servers: dict[str, Any] = {}
-            _register_gateway_server(mcp_servers)
-        assert mcp_servers == {}
-
-    def test_preserves_other_servers_already_registered(self):
-        # Registration must be additive — a pre-registered server (e.g. the
-        # clarification tool) is left untouched.
-        sentinel = object()
-        existing = object()
-        with patch("runner.build_gateway_server", return_value=sentinel):
-            mcp_servers: dict[str, Any] = {"clarification": existing}
-            _register_gateway_server(mcp_servers)
-        assert mcp_servers == {
-            "clarification": existing,
-            GATEWAY_SERVER_NAME: sentinel,
-        }
+    assert result is expected
+    awaited = harness.run.await_args
+    assert awaited is not None
+    request = awaited.args[0]
+    assert request.prompt == "do work"
+    assert request.enabled_tools == frozenset({"read_file"})
+    assert request.config.model_id == "us.anthropic.claude-opus-4-8"

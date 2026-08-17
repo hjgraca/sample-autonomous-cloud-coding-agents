@@ -277,7 +277,7 @@ def test_run_task_background_starts_and_stops_heartbeat(monkeypatch):
         task_description="x",
         issue_number="",
         github_token="",
-        anthropic_model="",
+        model_id="",
         max_turns=10,
         max_budget_usd=None,
         aws_region="us-east-1",
@@ -314,7 +314,7 @@ def test_run_task_background_propagates_correlation_envelope(monkeypatch):
         task_description="x",
         issue_number="",
         github_token="",
-        anthropic_model="",
+        model_id="",
         max_turns=10,
         max_budget_usd=None,
         aws_region="us-east-1",
@@ -932,7 +932,7 @@ class TestMicrovmRunHookInlinePayload:
 
         assert started.wait(timeout=5.0), "pipeline thread did not start"
         # Same mapping the /invocations path performs: prompt→task_description,
-        # model_id→anthropic_model, etc. — one mapper, not two.
+        # prompt→task_description; model_id already matches end-to-end.
         assert seen["task_id"] == "t-microvm-1"
         assert seen["repo_url"] == "org/repo"
         assert seen["task_description"] == "Fix the bug"
@@ -991,7 +991,7 @@ class TestMicrovmRunHookInlinePayload:
             ),
         )
         assert started.wait(timeout=5.0)
-        assert seen["anthropic_model"] == "anthropic.claude-x"
+        assert seen["model_id"] == "anthropic.claude-x"
         assert seen["cedar_policies"] == ["p1"]
         assert seen["channel_source"] == "linear"
 

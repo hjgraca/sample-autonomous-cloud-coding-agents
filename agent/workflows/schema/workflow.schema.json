@@ -73,7 +73,7 @@
     "agent_config": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Everything that shapes the Claude Agent SDK session for this task type. Asset kinds mirror the #246 registry vocabulary (capability/skill/plugin/mcp_server/prompt_fragment/cedar_policy_module). Layered over repo-discovered config (.claude/, .mcp.json) per repo_config below.",
+      "description": "Everything that shapes the Strands agent session for this task type. Asset kinds mirror the #246 registry vocabulary (capability/skill/plugin/mcp_server/prompt_fragment/cedar_policy_module). Layered over repo-discovered instructions and .mcp.json per repo_config below.",
       "required": ["tier", "allowed_tools"],
       "properties": {
         "tier": {

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import inspect
 import os
@@ -56,9 +55,9 @@ from telemetry import (
 if TYPE_CHECKING:
     from workflow import Workflow
 
-_SDK_NO_RESULT_MESSAGE = (
-    "Agent SDK stream ended without a ResultMessage (agent_status=unknown). "
-    "Treat as failure: possible SDK bug, network interruption, or protocol mismatch."
+_HARNESS_NO_RESULT_MESSAGE = (
+    "Agent harness ended without a terminal result (agent_status=unknown). "
+    "Treat as failure: possible harness bug or network interruption."
 )
 
 
@@ -593,8 +592,8 @@ def _resolve_overall_task_status(
         return "success", err
 
     # #251 carry-path: a hook may have detected an environmental blocker mid-run
-    # (egress denial, policy fail-closed) that the SDK surfaced only as a generic
-    # failure or as a missing ResultMessage. Promote the canonical
+    # (egress denial, policy fail-closed) that the harness surfaced only as a
+    # generic failure or as a missing terminal result. Promote the canonical
     # ``BLOCKED[<kind>]: …`` reason so the CDK classifier attaches a precise
     # remedy. Import locally to avoid a module-load cycle (hooks imports
     # pipeline-adjacent modules).
@@ -606,19 +605,19 @@ def _resolve_overall_task_status(
         if pr_url:
             log(
                 "INFO",
-                f"No ResultMessage from SDK (agent_status=unknown); pr_url present: {pr_url}",
+                f"No terminal harness result (agent_status=unknown); pr_url present: {pr_url}",
             )
         if build_ok:
             log(
                 "INFO",
-                "No ResultMessage from SDK; build_ok=True (informational; task still failed)",
+                "No terminal harness result; build_ok=True (informational; task still failed)",
             )
         # An egress denial that kills the agent's outbound calls is a likely
-        # cause of a missing ResultMessage — prefer the specific blocker reason
-        # over the generic SDK-no-result message when both are present.
+        # cause of a missing terminal result; prefer the specific blocker reason
+        # over the generic harness-no-result message when both are present.
         if blocker and not err:
             return "error", blocker
-        merged = f"{err}; {_SDK_NO_RESULT_MESSAGE}" if err else _SDK_NO_RESULT_MESSAGE
+        merged = f"{err}; {_HARNESS_NO_RESULT_MESSAGE}" if err else _HARNESS_NO_RESULT_MESSAGE
         return "error", merged
 
     if not err:
@@ -733,16 +732,10 @@ def _compute_turns_completed(
     turns_attempted: int | None,
     max_turns: int,
 ) -> int | None:
-    """Clamp ``turns_completed`` to ``max_turns`` when the SDK hit the limit.
-
-    The Claude Agent SDK reports ``num_turns = max_turns + 1``
-    on ``error_max_turns`` because the aborted attempt is counted.  Clamping
-    at the final write keeps ``turns_completed`` truthful ("how many turns
-    actually executed") while ``turns_attempted`` keeps the raw SDK value
-    for debugging.
+    """Clamp ``turns_completed`` to ``max_turns`` when the harness hit the limit.
 
     Returns ``None`` if ``turns_attempted`` is ``None``/falsy so callers can
-    round-trip a missing SDK count without inventing a fake zero.
+    round-trip a missing harness count without inventing a fake zero.
     """
     if not turns_attempted:
         return turns_attempted
@@ -807,7 +800,7 @@ def run_task(
     task_description: str = "",
     issue_number: str = "",
     github_token: str = "",
-    anthropic_model: str = "",
+    model_id: str = "",
     max_turns: int = 100,
     max_budget_usd: float | None = None,
     aws_region: str = "",
@@ -860,7 +853,7 @@ def run_task(
         task_description=task_description,
         issue_number=issue_number,
         github_token=github_token,
-        anthropic_model=anthropic_model,
+        model_id=model_id,
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
         aws_region=aws_region,
@@ -912,7 +905,7 @@ def run_task(
     log("TASK", f"Task ID: {config.task_id}")
     log("TASK", f"Repository: {config.repo_url}")
     log("TASK", f"Issue: {config.issue_number or '(none)'}")
-    log("TASK", f"Model: {config.anthropic_model}")
+    log("TASK", f"Model: {config.model_id}")
 
     with task_span(
         "task.pipeline",
@@ -920,7 +913,7 @@ def run_task(
             "task.id": config.task_id,
             "repo.url": config.repo_url,
             "issue.number": config.issue_number,
-            "agent.model": config.anthropic_model,
+            "agent.model": config.model_id,
             # Correlation envelope (#245): user.id joins agent spans to
             # orchestrator logs by the platform identity, not just task/repo.
             **({"user.id": config.user_id} if config.user_id else {}),
@@ -1048,7 +1041,7 @@ def run_task(
             # Configure git identity and gh auth before setup_repo() uses them.
             # Use GIT_AUTHOR_*/GIT_COMMITTER_* env vars rather than
             # `git config --global`: git honors these for every commit (inherited
-            # by Claude Code and the safety-net commit in post_hooks) WITHOUT
+            # by the Strands coding tools and the safety-net commit in post_hooks) WITHOUT
             # writing to any on-disk config. `--global` would clobber the real
             # ~/.gitconfig — harmless in the ephemeral container, but destructive
             # when this pipeline runs on a developer workstation (#622).
@@ -1228,15 +1221,6 @@ def run_task(
             log("TASK", "Starting agent...")
             if config.max_budget_usd:
                 log("TASK", f"Budget limit: ${config.max_budget_usd:.2f}")
-            # Warn if uvloop is the active policy — subprocess SIGCHLD conflicts.
-            policy = asyncio.get_event_loop_policy()
-            policy_name = type(policy).__name__
-            if "uvloop" in policy_name.lower():
-                log(
-                    "WARN",
-                    f"uvloop detected ({policy_name}) — this may cause subprocess "
-                    f"SIGCHLD conflicts with the Claude Agent SDK",
-                )
             with task_span("task.agent_execution") as agent_span:
                 try:
                     agent_result = _execute_agent_step(
@@ -1265,7 +1249,7 @@ def run_task(
             )
 
             # Cancel short-circuit: the Stop hook signalled cancel by stopping
-            # the SDK early, but that only stops the agent loop — post-hooks
+            # the harness early, but that only stops the agent loop — post-hooks
             # (ensure_committed, ensure_pr) would still run and push/open a PR
             # on a cancelled task.  Re-check the task status here and exit the
             # pipeline before any side-effect-producing post-hook runs.  The
@@ -1542,8 +1526,8 @@ def run_task(
             duration = time.time() - start_time
             disk_after = get_disk_usage(AGENT_WORKSPACE)
 
-            # Overall status: do not infer success from PR/build when the SDK never
-            # emitted ResultMessage (agent_status=unknown) — that masks protocol gaps.
+            # Overall status: do not infer success from PR/build when the harness
+            # never returned a terminal result (agent_status=unknown).
             # Gating honors each verify step's declared ``gate`` via the runner's
             # gate_status (#301); an undeclared verify_lint never gates (legacy).
             agent_status = agent_result.status
@@ -1597,7 +1581,7 @@ def run_task(
             # (the agent did the right thing by asking), not a failure — the
             # deliverable is the question. Force success + clear any error so the
             # platform surfaces "needs input", not ❌. (The agent emitted a normal
-            # ResultMessage, so overall_status is already 'success' in the common
+            # terminal harness result, so overall_status is already 'success' in the common
             # case; this guards the edge where a gate/marker interaction differs.)
             if needs_input:
                 overall_status = "success"
@@ -1804,11 +1788,10 @@ def run_task(
 
 
 #: Orchestrator payload keys that map to a differently-named ``run_task`` kwarg.
-#: The orchestrator emits ``prompt``/``model_id``; ``run_task`` calls them
-#: ``task_description``/``anthropic_model``. Everything else is a 1:1 name match.
+#: The orchestrator emits ``prompt`` while ``run_task`` calls it
+#: ``task_description``. Everything else is a 1:1 name match.
 _PAYLOAD_KEY_ALIASES = {
     "prompt": "task_description",
-    "model_id": "anthropic_model",
 }
 
 #: ``run_task`` kwargs that must be coerced to ``str`` — the orchestrator may
@@ -1969,7 +1952,7 @@ def main():
         task_description=config.task_description,
         issue_number=config.issue_number,
         github_token=config.github_token,
-        anthropic_model=config.anthropic_model,
+        model_id=config.model_id,
         max_turns=config.max_turns,
         max_budget_usd=config.max_budget_usd,
         aws_region=config.aws_region,

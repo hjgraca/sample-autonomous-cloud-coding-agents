@@ -1,9 +1,8 @@
 """Channel-specific MCP configuration for the agent container.
 
 For inbound channel sources that have a hosted MCP we write (or merge into)
-``.mcp.json`` in the cloned repo ``cwd`` so the Claude Agent SDK — configured
-with ``setting_sources=["project"]`` — picks up the channel MCP at session
-start and exposes the server's tools.
+``.mcp.json`` in the cloned repo ``cwd`` so the harness picks up the channel
+MCP at session start and exposes the server's tools.
 
 Currently wired channels:
 - ``jira``    → Atlassian Remote MCP entry — a NON-FUNCTIONAL placeholder. It
@@ -54,7 +53,7 @@ if TYPE_CHECKING:
 #: only as a forward-looking placeholder. The hosted Atlassian MCP requires an
 #: interactive, browser-based OAuth 2.1 flow with dynamic client registration
 #: and will NOT accept the stored REST OAuth token as a Bearer header, so it
-#: fails to connect in the runtime (``claude mcp list`` → "Failed to connect").
+#: fails to connect in the headless runtime.
 #:
 #: The LIVE outbound path is ``agent/src/jira_reactions.py``. It uses the
 #: signed Forge app proxy when configured and retains direct REST + OAuth only

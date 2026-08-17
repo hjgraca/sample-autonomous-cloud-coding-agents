@@ -1,16 +1,14 @@
-"""In-process SDK MCP bridge to the AgentCore Gateway (ADR-019 P1).
+"""Strands tool bridge to the AgentCore Gateway (ADR-019 P1).
 
 ABCA federates its agent-facing MCP tools behind a single managed **AgentCore
-Gateway** whose inbound auth is ``AWS_IAM`` (SigV4). The Claude Agent SDK's
-*remote* MCP client (the ``.mcp.json`` ``http`` transport) can only attach a
+Gateway** whose inbound auth is ``AWS_IAM`` (SigV4). A normal remote MCP client
+can only attach a
 STATIC ``Authorization`` header, so it cannot talk to a SigV4 endpoint — every
 request needs a fresh signature over its own body + timestamp.
 
-Rather than run a separate stdio proxy subprocess (the shape ADR-019 originally
-sketched), this module bridges **in-process**: the agent process already holds
-the compute role's AWS credentials, so it registers a local
-:func:`create_sdk_mcp_server` tool (the same mechanism as
-``clarification_tool.py``) whose implementation:
+Rather than run a separate stdio proxy subprocess, this module bridges
+**in-process**: the agent process already holds the compute role's AWS
+credentials, so it registers a local Strands tool whose implementation:
 
 1. resolves the compute role's credentials + region,
 2. opens a SigV4-signed Streamable-HTTP MCP session to the Gateway
@@ -20,7 +18,7 @@ the compute role's AWS credentials, so it registers a local
 
 The credentials never leave the process and there is no subprocess to manage.
 The whole bridge is gated on :data:`GATEWAY_URL_ENV`: absent (local dev, tests,
-or a deploy without ``--context enableToolGateway=true``) → :func:`build_gateway_server`
+or a deploy without ``--context enableToolGateway=true``) → :func:`build_gateway_tool`
 returns ``None`` and the runner simply doesn't offer the tool.
 
 This is the P1 slice — a single read-only tool (``abca_repo_config``). The
@@ -54,14 +52,8 @@ GATEWAY_URL_ENV = "ABCA_TOOL_GATEWAY_URL"
 #: SigV4 signing service name for AgentCore Gateway data-plane invokes.
 GATEWAY_SERVICE = "bedrock-agentcore"
 
-#: In-process SDK MCP server name. The SDK surfaces each tool as
-#: ``mcp__<server>__<tool>``; the model therefore sees
-#: ``mcp__abca_gateway__repo_config``. Named neutrally as a general convention
-#: (no channel-specific term like "linear"). NOTE: this is a naming convention,
-#: NOT something ``strip_linear_mcp_servers`` enforces — that scrubber only
-#: rewrites the on-disk ``.mcp.json`` in the cloned repo and never sees this
-#: in-process SDK server.
-GATEWAY_SERVER_NAME = "abca_gateway"
+#: Stable neutral tool name shown to the model and Cedar adapter.
+GATEWAY_TOOL_NAME = "abca_repo_config"
 
 #: Suffix of the federated tool name the Gateway exposes
 #: (``<targetName>___abca_repo_config``). We match on the suffix so the agent
@@ -179,17 +171,6 @@ async def _call_gateway(url: str, region: str, tool_suffix: str, arguments: dict
         )
 
 
-#: The tool description shown to the model. Module-level so the wording is one
-#: place and the test can assert the tool is registered with it.
-_REPO_CONFIG_DESCRIPTION = (
-    "Look up the ABCA onboarding configuration for a GitHub repository — its "
-    "compute substrate, model, and the build/lint commands ABCA gates PRs "
-    "against. Use this to align your build verification with what the "
-    'platform CI expects. The "repo" argument is the "owner/name" slug '
-    '(e.g. "aws-samples/my-repo") — usually the repository you are working in.'
-)
-
-
 #: Exception types that represent an EXPECTED federation hiccup — network,
 #: transport, timeout, or a Gateway/MCP-level error. These are logged at WARN
 #: and surfaced as a tool error; anything outside this set is treated as an
@@ -269,32 +250,13 @@ async def _repo_config_impl(gateway_url: str, region: str, args: dict[str, Any])
     }
 
 
-def build_gateway_server() -> Any:
-    """Build the in-process SDK MCP server bridging to the AgentCore Gateway.
-
-    Returns the SDK server config for ``ClaudeAgentOptions(mcp_servers=...)``,
-    or ``None`` when the bridge is disabled — the Gateway URL env is unset
-    (feature off) or the SDK is unavailable. In both cases the runner just
-    doesn't offer the tool.
-    """
+def build_gateway_tool() -> Any:
+    """Build the Strands tool bridging to the AgentCore Gateway."""
     gateway_url = os.environ.get(GATEWAY_URL_ENV, "").strip()
     if not gateway_url:
         return None
 
-    try:
-        from claude_agent_sdk import create_sdk_mcp_server, tool
-    except ImportError as exc:  # pragma: no cover - SDK always present in the container
-        # Feature-detect: no SDK means the bridge can't be built, so return None
-        # (like the URL-unset path above) to disable the tool rather than abort
-        # startup — callers treat None as "gateway tool not offered", not failure.
-        # Log a WARN (matching the region-unset path below) so this isn't silent:
-        # the operator opted in via the URL, so "can't honor it" deserves a signal.
-        log(
-            "WARN",
-            f"{GATEWAY_URL_ENV} is set but claude_agent_sdk is unavailable "
-            f"({exc}); AgentCore Gateway tool bridge disabled",
-        )
-        return None  # nosemgrep: py-silent-success-masking -- feature-detect logged above; tool disabled not failed  # noqa: E501
+    from strands import tool
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or ""
     if not region:
@@ -310,10 +272,17 @@ def build_gateway_server() -> Any:
         )
         return None
 
-    # Thin SDK closure over _repo_config_impl (tested directly, so the wrapper
-    # itself is not exercised by unit tests).
-    @tool("repo_config", _REPO_CONFIG_DESCRIPTION, {"repo": str})
-    async def repo_config(args: dict[str, Any]) -> dict[str, Any]:  # pragma: no cover
-        return await _repo_config_impl(gateway_url, region, args)
+    @tool(name=GATEWAY_TOOL_NAME)
+    async def repo_config(repo: str) -> str:
+        """Look up ABCA onboarding configuration for a GitHub repository."""
+        result = await _repo_config_impl(gateway_url, region, {"repo": repo})
+        text = "\n".join(
+            str(block.get("text", block))
+            for block in result.get("content", [])
+            if isinstance(block, dict)
+        )
+        if result.get("isError"):
+            raise RuntimeError(text or "AgentCore Gateway tool failed")
+        return text
 
-    return create_sdk_mcp_server(name=GATEWAY_SERVER_NAME, tools=[repo_config])
+    return repo_config
