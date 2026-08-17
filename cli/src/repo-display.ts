@@ -37,7 +37,7 @@ export const PLATFORM_REPO_DEFAULTS = {
   compute_type: 'agentcore',
   /**
    * The model a repo gets when it pins none — the cross-region inference profile
-   * the runtime actually invokes (see the agent's ``ANTHROPIC_MODEL`` fallback and
+   * the runtime actually invokes (see the agent's ``MODEL_ID`` fallback and
    * the Bedrock grant list it must appear in).
    *
    * Keep these three in step. This is not only what ``repo show`` prints:

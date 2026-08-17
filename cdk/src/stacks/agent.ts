@@ -449,13 +449,6 @@ export class AgentStack extends Stack {
     const runtimeEnvironmentVariables = {
       GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
-      CLAUDE_CODE_USE_BEDROCK: '1',
-      ANTHROPIC_LOG: 'debug',
-      // Cross-region inference-profile id (``us.`` prefix), NOT the bare
-      // foundation-model id: Claude 4.x can't be invoked on-demand by bare id
-      // (400 "on-demand throughput isn't supported"). Must match a granted
-      // profile (see bedrock-models.ts). runner.py re-sets this at spawn time.
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
@@ -495,9 +488,7 @@ export class AgentStack extends Stack {
       MISE_DATA_DIR: '/tmp/mise-data',
       UV_CACHE_DIR: '/tmp/uv-cache',
       // Persistent mount (no flock):
-      CLAUDE_CONFIG_DIR: '/mnt/workspace/.claude-config',
       npm_config_cache: '/mnt/workspace/.npm-cache',
-      // ENABLE_CLI_TELEMETRY: '1',
       // Outbound SDK solution attribution (#319): botocore reads
       // AWS_SDK_UA_APP_ID natively → `app/uksb-wt64nei4u6#{stack}`. The
       // Lambda-only Aspect can't reach this runtime, so set it explicitly.

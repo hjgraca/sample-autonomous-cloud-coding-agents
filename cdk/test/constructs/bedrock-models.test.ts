@@ -85,8 +85,8 @@ describe('DEFAULT_BEDROCK_MODEL_IDS covers the agent runtime default', () => {
     const configPy = fs.readFileSync(
       path.resolve(__dirname, '../../../agent/src/config.py'), 'utf8',
     );
-    // The fallback is the second argument to the ANTHROPIC_MODEL env lookup.
-    const match = configPy.match(/"ANTHROPIC_MODEL",\s*"([^"]+)"/);
+    // The fallback is the second argument to the MODEL_ID env lookup.
+    const match = configPy.match(/"MODEL_ID",\s*"([^"]+)"/);
     expect(match).not.toBeNull();
     const agentDefault = match![1];
 

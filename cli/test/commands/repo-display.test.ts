@@ -109,7 +109,7 @@ describe('buildRepoShowLines', () => {
     const configPy = fs.readFileSync(
       path.resolve(__dirname, '../../../agent/src/config.py'), 'utf8',
     );
-    const match = configPy.match(/"ANTHROPIC_MODEL",\s*"([^"]+)"/);
+    const match = configPy.match(/"MODEL_ID",\s*"([^"]+)"/);
     expect(match).not.toBeNull();
     expect(PLATFORM_REPO_DEFAULTS.model_id).toBe(match![1]);
   });

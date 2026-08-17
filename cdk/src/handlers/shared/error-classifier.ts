@@ -383,39 +383,14 @@ const PATTERNS: readonly ErrorPattern[] = [
       errorClass: ErrorClass.TRANSIENT,
     },
   },
-  {
-    // The `claude` CLI on the agent image couldn't be exec'd: either the OS
-    // refused the binary (`OSError: [Errno 8] Exec format error: 'claude'`) or
-    // the claude-code shim reports its platform-native binary was never placed
-    // ("claude native binary not installed" — its postinstall silently fell
-    // back at image-build time). Observed in practice: three consecutive ECS runs
-    // all died at the run_agent step this way on a freshly rebuilt image, while the
-    // native binary was present but unwired. This is an IMAGE/infra fault, NOT a
-    // problem with the user's request — a fresh attempt usually lands on a host
-    // that materializes the image cleanly; a persistent one is a bad build an
-    // admin must rebuild. Without this bucket it fell through to a bare
-    // "Unexpected error" with no guidance (the anti-pattern the error-feedback
-    // work set out to kill). Matched before AGENT/UNKNOWN so the precise,
-    // retry-oriented copy wins.
-    pattern: /Exec format error.*claude|claude.*Exec format error|claude native binary not installed/i,
-    classification: {
-      category: ErrorCategory.COMPUTE,
-      title: 'Couldn\'t start the coding agent (environment issue)',
-      description: 'The agent runtime couldn\'t launch the `claude` CLI on the compute image — an infrastructure/image problem, not a problem with your request or code.',
-      remedy: 'This is usually a transient image/compute hiccup. Reply here to try again — a fresh attempt typically clears it. If every attempt fails the same way, the agent image needs a rebuild: contact your ABCA admin with the task id above.',
-      retryable: true,
-      errorClass: ErrorClass.TRANSIENT,
-    },
-  },
-
   // --- Agent ---
   {
-    pattern: /Agent SDK stream ended without a ResultMessage/i,
+    pattern: /Strands stream ended without an AgentResult/i,
     classification: {
       category: ErrorCategory.AGENT,
-      title: 'Agent SDK stream ended unexpectedly',
-      description: 'The Claude Agent SDK stream closed without returning a result. This may indicate a network interruption, SDK bug, or protocol mismatch.',
-      remedy: 'Retry the task. If persistent, check the agent container logs and SDK version compatibility.',
+      title: 'Agent harness stream ended unexpectedly',
+      description: 'The Strands harness stream closed without returning a result. This may indicate a network interruption or SDK failure.',
+      remedy: 'Retry the task. If persistent, check the agent container logs and Bedrock connectivity.',
       retryable: true,
       errorClass: ErrorClass.TRANSIENT,
     },
@@ -469,7 +444,7 @@ const PATTERNS: readonly ErrorPattern[] = [
     classification: {
       category: ErrorCategory.AGENT,
       title: 'Agent errored during execution',
-      description: 'The agent raised an uncaught error mid-turn. The Claude Agent SDK reported the task as failed before a clean terminal.',
+      description: 'The agent raised an uncaught error mid-turn and failed before a clean terminal.',
       remedy: 'Retry the task. If persistent, check the agent container logs and the PR branch for partial state.',
       retryable: true,
       errorClass: ErrorClass.TRANSIENT,
@@ -538,11 +513,11 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    pattern: /receive_response\(\) failed/i,
+    pattern: /Strands agent failed:/i,
     classification: {
       category: ErrorCategory.AGENT,
       title: 'Agent communication failure',
-      description: 'The agent runner failed to receive a response from the Claude Agent SDK.',
+      description: 'The Strands harness failed while running the agent loop.',
       remedy: 'Retry the task. If persistent, check Bedrock model availability and agent container connectivity.',
       retryable: true,
       errorClass: ErrorClass.TRANSIENT,
