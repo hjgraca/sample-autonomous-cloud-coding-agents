@@ -4,73 +4,68 @@ title: Cost attribution
 
 # Cost attribution (operator guide)
 
-How to attribute **Amazon Bedrock model-inference spend** to individual users and repositories in a multi-user ABCA deployment. This is the operator-facing companion to the platform design in [BEDROCK_COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/architecture/bedrock-cost-attribution) and the cost model in [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model#cost-attribution).
+How to attribute **Amazon Bedrock model-inference spend** to users and repositories in a multi-user ABCA deployment. This is the operator-facing companion to [BEDROCK_COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/architecture/bedrock-cost-attribution) and [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model#cost-attribution).
 
 > [!WARNING]
-> **The in-app `cost_usd` is a client-side estimate, not authoritative billing data.** It is the Claude Agent SDK's `total_cost_usd` (`agent/src/runner.py`), computed locally from a price table bundled into the SDK at build time. It can drift from your actual AWS bill when Bedrock pricing changes, the SDK version does not recognize a model, prompt-cache read/write rates apply, or AWS discounts/commitments/free-tier apply that the client cannot model. Use it for per-task budget guardrails and approximate insight — **do not bill end users or trigger financial decisions from it.** For authoritative cost, use **AWS Cost Explorer / CUR 2.0** (the session-tag chargeback meter below), which reflects your actual invoice. (ABCA runs on Bedrock, so the authoritative source is your AWS bill — not the Claude Console.)
+> **The in-app `cost_usd` is a client-side estimate, not authoritative billing data.** The Strands harness reads Bedrock token metrics and applies the local rates in `agent/src/model_pricing.py`. Pricing changes, AWS discounts, commitments, and free tier can make it differ from the invoice. Use it for per-task budget guardrails and approximate insight. Use AWS Cost Explorer or CUR 2.0 for financial decisions.
 
-## Three meters, three questions
-
-ABCA gives you three independent views of cost. They answer different questions; use them together.
+## Two cost meters
 
 | Meter | Granularity | Source of truth for | Where |
 |---|---|---|---|
-| **In-app `cost_usd`** | Per task | Per-task budget guardrails (`max_budget_usd`) | Task metadata / control panel |
-| **CUR session-tag chargeback** | Per user / per repo, aggregated per usage-type per day | AWS-native FinOps chargeback | Cost Explorer / CUR 2.0 |
-| **Invocation-log metadata** | Per Bedrock call | Per-call forensics, reconciliation | `/aws/bedrock/model-invocation-logs/<stack>` |
+| **In-app `cost_usd`** | Per task | `max_budget_usd` guardrails and approximate task cost | Task metadata / control panel |
+| **CUR session-tag chargeback** | Per user/repo, aggregated by AWS billing dimensions | AWS-native FinOps chargeback | Cost Explorer / CUR 2.0 |
 
-Why all three: the in-app meter is an estimate the platform computes; it does not reflect AWS discounts/commitments. IAM session tags flow to your **bill** but only as aggregated billing data (they are *not* written to invocation logs). Request metadata gives **per-call** detail in logs but is *not* a cost-allocation tag and never appears in Cost Explorer. Per [AWS docs](https://docs.aws.amazon.com/bedrock/latest/userguide/cost-mgmt-iam-principal-tracking.html), session tags and request metadata are complementary mechanisms.
+The in-app meter is immediate but estimated. Session tags reach the AWS bill but appear on billing's aggregation schedule.
+
+Bedrock model-invocation logging remains useful for model, prompt, and token diagnostics. ABCA does not currently stamp `{task_id,user_id,repo}` as Bedrock `requestMetadata`, so invocation logs are not a third task-attribution meter.
 
 ## What the platform does automatically
 
-Once deployed, each agent task makes its Bedrock calls under **session-tagged, refreshable credentials** carrying `{user_id, repo, task_id}`, and stamps the same values as **request metadata** on every call. You do **not** need to change any code. What remains is **operator setup in the AWS Billing console** — AWS does not surface tag-based cost data until you activate it, and (see the ordering note below) you can only activate *after* the platform has run tagged tasks.
+In deployed AgentCore and ECS tasks, Strands calls Bedrock through the refreshable boto session returned by `aws_session.get_session()`. That session assumes `AgentSessionRole` with `{user_id, repo, task_id}` IAM session tags. The same path is used for tenant DynamoDB/S3 access and direct Bedrock model calls.
+
+No credential-export helper, subprocess SDK, or model-provider-specific environment settings are involved. Local runs without `AGENT_SESSION_ROLE_ARN` use the normal ambient AWS credential chain.
+
+Operator setup is still required in AWS Billing. Cost-allocation tag keys do not become selectable until tagged calls have occurred.
 
 ## FinOps checklist
 
-These steps are a one-time operator responsibility (CDK does not automate org-level billing — see [Out of scope](/sample-autonomous-cloud-coding-agents/architecture/bedrock-cost-attribution#out-of-scope-unchanged-from-issue)).
-
-> **Ordering matters — the tags can't be pre-activated.** IAM-principal cost-allocation tag *keys* (`user_id`, `repo`) do not exist in the Billing console until the deployed platform has actually made tagged Bedrock calls. So the sequence is: **deploy → run at least one task → wait up to 24 h → then activate** (step 1). You cannot activate them before the first tagged call exists.
+> **Ordering matters.** Deploy, run at least one task, wait up to 24 hours, then activate the tags. Activation is not retroactive.
 >
-> **Use the Billing console, not Tag Editor / Resource Groups.** Cost-allocation tags live at **Billing and Cost Management → Cost allocation tags** (left nav). The *Tag Editor* (Resource Groups) is a different tool — it lists taggable *resource types* (`AWS::IAM::InstanceProfile`, etc.) and is **not** where you activate these.
+> Use **Billing and Cost Management -> Cost allocation tags**, not Resource Groups Tag Editor.
 
-1. **Activate IAM-principal cost-allocation tags.** Billing and Cost Management console → **Cost allocation tags** (left nav) → the **User-defined cost allocation tags** tab → the `user_id` and `repo` keys appear with tag type **IAM principal** → select them → **Activate**. (`task_id` is high-cardinality — keep it for logs, not Cost Explorer.)
-   - Keys appear only **after** the first Bedrock call carrying them, and can take **up to 24 h** to show.
-   - Activation is **not retroactive** — only spend incurred after activation is tagged.
-   - IAM-principal cost-allocation tags are a recent Bedrock capability. If the keys never appear a day after running tagged tasks, your account/region may not have it enabled yet — the invocation-log path (below) attributes per call regardless.
-2. **Create a CUR 2.0 export with caller identity.** Billing console → **Data Exports** → create a CUR 2.0 export and select the option to include the **caller-identity ARN**.
-   - If you already have a CUR 2.0 export, you must create a **new** one — existing exports do not backfill identity data.
-3. **Set budgets / alerts** per `user_id` or `repo` tag as needed (AWS Budgets), independent of the in-app `max_budget_usd` per-task guardrail.
+1. Open **Cost allocation tags -> User-defined cost allocation tags** and activate the IAM-principal keys `user_id` and `repo`.
+2. Create a CUR 2.0 export with **caller-identity ARN** included. Existing exports do not backfill identity fields, so create a new export when necessary.
+3. Build Cost Explorer views, CUR queries, and AWS Budgets grouped by `user_id` or `repo`.
+4. Keep `task_id` out of routine cost grouping because it is high-cardinality; use task metadata for per-task estimates.
 
-## Querying per-call detail (invocation logs)
+If the keys do not appear after tagged tasks and a 24-hour wait, verify that the task used `AgentSessionRole` and that IAM-principal cost allocation is available in the account and Region.
 
-> **Model-invocation logging must be ON in the agent's Region, or there is no `requestMetadata` to query.** Bedrock records request metadata **only** when account-level model-invocation logging is enabled in the Region where the call is made. The stack provisions this automatically (a custom resource pointing at the `/aws/bedrock/model-invocation-logs/<stack>` log group), but it is **account- and Region-scoped**, so confirm it after deploy — especially if logging was previously disabled, or the stack Region differs from where you expect calls.
->
-> Verify it is on:
-> ```
-> aws bedrock get-model-invocation-logging-configuration --region <stack-region>
-> ```
-> An empty result means logging is **off** and no metadata is being captured. Re-enable it (pointing at the stack's own log group + `BedrockLoggingRole`):
-> ```
-> aws bedrock put-model-invocation-logging-configuration --region <stack-region> \
->   --logging-config '{"cloudWatchConfig":{"logGroupName":"/aws/bedrock/model-invocation-logs/<stack>","roleArn":"<BedrockLoggingRole ARN>"},"textDataDeliveryEnabled":true,"imageDataDeliveryEnabled":false,"embeddingDataDeliveryEnabled":false}'
-> ```
-> Do **not** include `largeDataDeliveryS3Config` with an empty bucket name — Bedrock rejects it (`min length: 3`) and the call fails. Only calls made *after* logging is enabled are recorded; re-run a task to populate logs.
+## Model-invocation logs
 
-Request metadata lands under the top-level `requestMetadata` field of each log record. Example CloudWatch Logs Insights query (tokens per user + model):
+The stack configures account-level Bedrock model-invocation logging in its Region and writes records to `/aws/bedrock/model-invocation-logs/<stack>`. Confirm it with:
 
+```bash
+aws bedrock get-model-invocation-logging-configuration --region <stack-region>
 ```
-fields requestMetadata.user_id as user, modelId,
+
+These logs support model-level token and latency analysis. Without ABCA request metadata, query by model and time window:
+
+```text
+fields modelId,
        input.inputTokenCount as inTokens,
        output.outputTokenCount as outTokens
-| stats sum(inTokens) as totalInput, sum(outTokens) as totalOutput, count() as calls
-        by user, modelId
+| stats sum(inTokens) as totalInput,
+        sum(outTokens) as totalOutput,
+        count() as calls by modelId
 | sort totalInput desc
 ```
 
-To turn tokens into cost, multiply by the current [Bedrock per-token rates](https://aws.amazon.com/bedrock/pricing/), or join logs to CUR on `requestId` for invoice-accurate reconciliation at the model + usage-type grain.
+Do not treat a timestamp-based join between invocation logs and a task as invoice-grade attribution. CUR session tags are the authoritative supported path.
 
 ## Caveats
 
-- **Request-metadata header is best-effort.** It depends on Claude Code signing the `X-Amzn-Bedrock-Request-Metadata` header into the SigV4 request; if a Claude Code release does not, the header is rejected and per-call metadata is absent. Per-user/repo chargeback (the session-tag track) is unaffected — it does not rely on the header. See the [validation note](/sample-autonomous-cloud-coding-agents/architecture/bedrock-cost-attribution#track-2--per-request-metadata).
-- **Attribution fails open.** If the per-task credential helper cannot assume the SessionRole, Bedrock still works under the shared compute role — spend for that task is simply untagged, not blocked.
-- **No PII in tags/metadata.** `user_id` and `repo` are recorded in your bill and logs; do not map them to anything sensitive.
+- **Unknown pricing and budgets:** a task with `max_budget_usd` is rejected before invocation if `model_pricing.py` has no rate for its model. An unbudgeted task may run with `cost_usd` unset.
+- **Turn-boundary enforcement:** the harness evaluates accumulated usage after each model turn. A single turn can cross the configured dollar threshold before the next call is stopped.
+- **Tag activation is delayed and non-retroactive:** run a tagged task first, then activate the keys.
+- **No PII in tags:** `user_id` and `repo` are recorded in billing data.

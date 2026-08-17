@@ -27,7 +27,7 @@ The backend is selected per repo via `compute_type` in the Blueprint config. The
 
 Each session:
 
-- **Runs the agent harness** (Claude Agent SDK) with the foundation model inference loop
+- **Runs the Strands agent harness** with a direct Amazon Bedrock foundation-model loop
 - **Clones the repo**, creates or checks out a branch, edits files, runs shell commands (build, test, lint)
 - **Makes outbound API calls** to GitHub (clone, push, PR), Bedrock (model invocation), and tool services (AgentCore Gateway, Memory)
 - **Reads/writes memory** via AgentCore Memory for cross-session learning
@@ -61,7 +61,7 @@ The platform works around this by splitting storage:
 |------|----------|-----|
 | Repo clone | `/workspace` (ephemeral) | Build tools need `flock()` |
 | npm cache | `/mnt/workspace` (persistent) | npm uses lockless atomic ops |
-| Claude Code config | `/mnt/workspace` (persistent) | No `flock()` needed |
+| Agent interaction state | DynamoDB task/event tables | Durable across process and client disconnects |
 | mise data, uv cache | `/tmp/` (ephemeral) | Both use `flock()` internally |
 
 ### Timeouts
@@ -90,9 +90,9 @@ Both defs **share one task role, one execution role, one container image, and on
 
 The agent harness is the layer around the LLM that manages the execution loop: context, tools, guardrails, and lifecycle. It is not the agent itself but the infrastructure that makes long-running autonomous agents reliable.
 
-### Claude Agent SDK
+### Strands Agents
 
-The platform uses the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python) as the harness. It provides the agent loop, built-in tools (filesystem, shell), and streaming message reception for per-turn trajectory capture (token usage, cost, tool calls).
+The platform uses [Strands Agents](https://strandsagents.com/) as the harness. `StrandsHarness` constructs a Strands `Agent` with `BedrockModel`, ABCA's repo-rooted coding tools, optional AgentCore Gateway tools, and MCP clients loaded from `.mcp.json`. `BedrockModel` receives the refreshable task-scoped boto session from `aws_session.get_session()`.
 
 **Execution model:** Tasks are fully unattended and one-shot. The agent loop runs in a background thread so the FastAPI `/ping` endpoint stays responsive on the main thread. The agent thread uses `asyncio.run()` with the stdlib event loop (uvicorn is configured with `--loop asyncio` to avoid uvloop conflicts with subprocess SIGCHLD handling).
 
@@ -104,19 +104,20 @@ The platform uses the [Claude Agent SDK](https://github.com/anthropics/claude-ag
 
 | Tool | Source | Description |
 |------|--------|-------------|
-| Shell execution | Native (MicroVM) | Build, test, lint via bash |
-| File system | Native (MicroVM) | Read/write code |
+| Shell execution | ABCA Strands tool | Build, test, lint from the repo root |
+| File system | ABCA Strands tools | Repo-rooted read/write/edit/glob/search |
 | GitHub | AgentCore Gateway + Identity | Clone, push, PR, issues |
 | Web search | AgentCore Gateway | Documentation lookups |
 
-Plugins, skills, and MCP servers are out of scope for MVP. Additional tools can be added via Gateway integration.
+Repository `.mcp.json` servers are loaded through Strands `MCPClient`. Registry-resolved plugins and skills remain future workflow assets. Additional platform tools can be added through AgentCore Gateway.
 
 ### Policy enforcement
 
 The harness enforces tool-call policy via Cedar-based hooks:
 
-- **PreToolUse** (`agent/src/hooks.py` + `agent/src/policy.py`) - Evaluates tool calls before execution. `pr_review` agents cannot use `Write`/`Edit`. Writes to `.git/*` are blocked. Destructive bash commands are denied. Fail-closed: if Cedar is unavailable, all calls are denied.
-- **PostToolUse** (`agent/src/hooks.py` + `agent/src/output_scanner.py`) - Screens tool outputs for secrets and redacts before re-entering agent context.
+- **`BeforeToolCallEvent`** (`agent/src/strands_hooks.py` + `agent/src/policy.py`) - Evaluates tool calls before execution. Neutral Strands tool names are mapped onto the stable Cedar vocabulary. `pr_review` agents cannot write, `.git/*` writes are blocked, and destructive shell commands are denied. Hook failures deny the call.
+- **`AfterToolCallEvent`** (`agent/src/strands_hooks.py` + `agent/src/output_scanner.py`) - Screens tool outputs for secrets and replaces unsafe output before it re-enters model context.
+- **`BeforeModelCallEvent` / `AfterInvocationEvent.resume`** - Handle cancellation, nudges, denial guidance, and budget stops between model turns.
 
 Per-repo custom Cedar policies are supported via Blueprint `security.cedarPolicies`. See [SECURITY.md](./SECURITY.md) for the full policy enforcement model.
 

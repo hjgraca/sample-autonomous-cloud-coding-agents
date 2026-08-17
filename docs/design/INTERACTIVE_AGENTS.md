@@ -27,7 +27,7 @@ This document describes the interactivity surfaces layered on top of that model 
 - **Durable event table (`TaskEventsTable`)** is the one source of truth for agent progress. Every reader — CLI, Slack/GitHub/email dispatchers, status Lambda — reads from this table, never from the live agent.
 - **Polling-only CLI.** No SSE, no WebSockets. DDB eventually-consistent reads with an `event_id` cursor are cheap, reliable, and compute-agnostic.
 - **Notification plane as first-class.** A FanOutConsumer Lambda subscribes to `TaskEventsTable` DDB Streams and routes per-event-type to per-channel dispatcher Lambdas (Slack, email, GitHub comment). Per-channel defaults ship in v1.
-- **Agent interaction via the hook mechanism the Claude Agent SDK provides.** Nudges, asks, and approvals all use `Stop` / between-turns hooks; no mechanism outside the SDK's contract is required.
+- **Agent interaction through typed Strands lifecycle hooks.** Tool approvals use `BeforeToolCallEvent`; cancellation and user guidance are checked at `BeforeModelCallEvent`, with `AfterInvocationEvent.resume` handling guidance that arrives as an invocation reaches `end_turn`.
 
 ---
 
@@ -54,7 +54,7 @@ This document describes the interactivity surfaces layered on top of that model 
 11. [Architectural decisions](#11-architectural-decisions)
 12. [Implementation phases](#12-implementation-phases)
 13. [Open questions](#13-open-questions)
-14. [Appendix A — Claude Agent SDK reference](#appendix-a--claude-agent-sdk-reference)
+14. [Appendix A — Strands lifecycle hooks](#appendix-a--strands-lifecycle-hooks)
 15. [Appendix B — AgentCore Runtime reference](#appendix-b--agentcore-runtime-reference)
 16. [Appendix C — Competitive landscape](#appendix-c--competitive-landscape)
 
@@ -218,7 +218,7 @@ Writers: create-task, orchestrator, cancel, agent pipeline (terminal write), rec
 PK = `task_id`, SK = `nudge_id`. A row represents a pending user steering message.
 
 Producer: `POST /tasks/{id}/nudge` handler (after ownership check, guardrail scan, and rate-limit conditional update).
-Consumer: agent between-turns hook reads pending nudges, emits `nudge_acknowledged` milestone, and injects the nudge text into the next turn via `decision: "block"`.
+Consumer: the Strands hook adapter reads pending nudges between model calls, emits `nudge_acknowledged`, and appends the guidance as a user message. If the invocation has reached `end_turn`, `AfterInvocationEvent.resume` starts the next turn with that guidance.
 
 ### 3.7 TaskApprovalsTable (Phase 3)
 
@@ -291,12 +291,12 @@ Authentication: Cognito User Pool ID token in `Authorization` header for all RES
 | `hydration_started` / `hydration_completed` | Agent startup | Blueprint + repo config loaded |
 | `session_started` | Orchestrator | AgentCore session established |
 | `agent_turn` | Runner | One model-roundtrip completed; includes turn number, model, thinking preview |
-| `agent_tool_call` | Runner / PreToolUse hook | About to invoke a tool |
-| `agent_tool_result` | Runner / PostToolUse hook | Tool returned |
+| `agent_tool_call` | Runner / `BeforeToolCallEvent` | About to invoke a tool |
+| `agent_tool_result` | Runner / `AfterToolCallEvent` | Tool returned |
 | `agent_milestone` | Agent code (pipeline, hooks) | Named checkpoint (`repo_cloned`, `pr_opened`, `nudge_acknowledged`, ...) |
 | `agent_cost_update` | Runner | Cumulative token + dollar cost |
 | `agent_error` | Runner | Handled exception |
-| `approval_required` (P3) | PreToolUse Cedar hook | Cedar policy requires user decision |
+| `approval_required` (P3) | `BeforeToolCallEvent` Cedar adapter | Cedar policy requires user decision |
 | `approval_decided` (P3) | Approve/Deny Lambda | User responded |
 | `status_response` (P2) | Between-turns hook | Agent answered an `ask` |
 | `nudge_acknowledged` | Between-turns hook | Agent saw a nudge before incorporating it |
@@ -368,12 +368,12 @@ nudge queued: nudge_01JX...
 
 Flow:
 1. CLI `POST /tasks/{id}/nudge` → rate-limit conditional update + `PutItem` in `TaskNudgesTable`.
-2. Agent's Stop hook fires between turns. Calls `nudge_reader.read_pending(task_id)` — returns all pending nudges for this task (concatenated into one `<user_nudge>` block if multiple).
-3. Hook emits `nudge_acknowledged` milestone to `ProgressWriter` **before** returning to the SDK. User sees this event immediately via `watch` or Slack.
-4. Hook returns `{"decision": "block", "reason": <formatted_nudge_text>}`. The SDK treats this as the start of the next user turn; the agent incorporates the nudge on its response.
+2. Before the next model call, `StrandsHooks` calls the runtime-neutral `stop_hook`, which reads pending nudges and returns formatted guidance.
+3. The hook emits `nudge_acknowledged` to `ProgressWriter` before delivering the guidance. User sees this event immediately via `watch` or Slack.
+4. `BeforeModelCallEvent` appends the guidance as a user message. When the prior invocation already reached `end_turn`, `AfterInvocationEvent.resume` supplies the same guidance to resume the loop.
 5. Nudge row is marked consumed via conditional update (`consumed_at` set only if currently null).
 
-**Cost model — honest:** the nudge burns one turn from the task's `max_turns` budget. The acknowledgment rides in the same turn (the combined-turn ack pattern). This is the only mechanism the Claude Agent SDK exposes for injecting user-visible text mid-run; there is no "append to system prompt mid-conversation" API (see Appendix A).
+**Cost model — honest:** the response to a nudge consumes another model turn from `max_turns`. The acknowledgment is emitted before that call. Guidance is added as a user message; the construction-time system prompt is not mutated.
 
 ### 5.5 `bgagent ask` (Phase 2)
 
@@ -395,7 +395,7 @@ Flow:
 1. CLI `POST /tasks/{id}/asks` → `{ask_id, cursor}`.
 2. CLI polls `GET /events?after=<cursor>&type=status_response&correlation_id=<ask_id>` with adaptive interval.
 3. Spinner renders last `agent_turn` / `agent_tool_call` so the user sees the agent is alive.
-4. Agent's between-turns hook reads the pending ask, injects it as a user turn via `decision: "block"`, agent answers, hook emits `status_response{ask_id, content, turn}`.
+4. The Strands hook adapter reads the pending ask at a model boundary, adds it as user guidance (or sets `AfterInvocationEvent.resume`), and emits `status_response{ask_id, content, turn}` after the agent answers.
 5. CLI prints the response and exits.
 
 Flags:
@@ -606,7 +606,7 @@ $ bgagent submit --trace "fix the auth bug"
 
 Changes for a trace-enabled task:
 - `ProgressWriter` preview truncation raised from 200 chars → 4 KB.
-- Full agent trajectory (SDK message log, tool I/O, hook callbacks) written to S3 on task completion.
+- Full agent trajectory (Strands message log, tool I/O, hook callbacks) written to S3 on task completion.
 - A `trajectory_uploaded` milestone event with the S3 URI is emitted; the CLI can surface it at the end of `watch` or `status`.
 
 Storage:
@@ -654,9 +654,9 @@ FanOutConsumer routes events per-channel with sensible defaults shipping in v1.
 
 ### AD-5. Nudge acknowledgment via combined-turn ack
 
-The between-turns hook emits a `nudge_acknowledged` milestone to `ProgressWriter` **before** returning `decision: "block"` with the nudge text. One turn burned (same as today); acknowledgment visible immediately.
+The Strands hook adapter emits `nudge_acknowledged` to `ProgressWriter` before appending nudge guidance for the next model call. One additional turn is consumed; acknowledgment is visible immediately.
 
-*Why:* The Claude Agent SDK does not expose a mechanism to append to system context mid-conversation. The `HookEvent` enum is fixed; `ClaudeAgentOptions.system_prompt` is construction-time only; `hookSpecificOutput.additionalContext` is user-visible-only (confirmed `not-planned` by Anthropic). One-turn-per-nudge is an architectural constraint of the SDK; we surface it honestly rather than pretending it's free.
+*Why:* Strands exposes message and resume controls at model boundaries, not a free out-of-band reasoning path. A nudge that changes agent behavior requires another model call and therefore consumes tokens and one turn.
 
 ### AD-6. `bgagent status` is deterministic; `bgagent ask` is the agent
 
@@ -764,41 +764,29 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 
 ---
 
-## Appendix A — Claude Agent SDK reference
+## Appendix A — Strands lifecycle hooks
 
-Pinned version: `claude-agent-sdk==0.2.82` (Python; see `agent/pyproject.toml`).
+Pinned version: `strands-agents==1.52.0` (Python; see `agent/pyproject.toml`).
 
-> **Caution — re-verify against 0.2.x.** The hook-surface details in this
-> appendix (the `HookEvent` enum members, `PostToolUseFailure`, the Stop-hook
-> return-value contract, etc.) were originally written against
-> `claude-agent-sdk==0.1.53`. The pin has since advanced to `0.2.82`, and the
-> SDK's hook API may have changed across that range. Before relying on any
-> specific enum member or hook signature below, verify it against the installed
-> 0.2.x SDK and the actual usage in `agent/src/hooks.py`.
+### A.1 Hook surface
 
-### A.1 Hook surface (verify against 0.2.x — originally documented for v0.1.53)
+`agent/src/strands_hooks.py` registers:
 
-`HookEvent` enum: `PreToolUse | PostToolUse | PostToolUseFailure | UserPromptSubmit | Stop | SubagentStart | SubagentStop | PreCompact | PermissionRequest | Notification`.
+- `BeforeToolCallEvent` — Cedar allow/deny/approval evaluation. Setting `event.cancel_tool` prevents execution.
+- `AfterToolCallEvent` — output screening, result replacement, progress, and stuck-loop tracking.
+- `BeforeModelCallEvent` — budget/cancellation stop and between-turn guidance before another model request.
+- `AfterModelCallEvent` — turn trajectory, progress, token usage, and cost calculation.
+- `AfterInvocationEvent` — when the model ends normally but new guidance is pending, setting `event.resume` continues with that guidance.
 
-Our usage:
-- `PreToolUse` → Cedar policy evaluation (Phase 3), `can_use_tool`-style allow/deny.
-- `PostToolUse` → output scanner (secret/PII redaction).
-- `Stop` (between-turns) → `_cancel_between_turns_hook`, `_nudge_between_turns_hook`, Phase 2 ask hook, Phase 3 approval poll.
+The runtime-neutral policy and interaction functions remain in `agent/src/hooks.py`; `StrandsHooks` adapts their existing return structures to typed events.
 
-### A.2 Between-turns injection mechanism
+### A.2 Guidance and turn accounting
 
-Stop hook return values:
-- `{}` → no-op, SDK proceeds to stop or loop.
-- `{"decision": "block", "reason": "<text>"}` → SDK emits `reason` as a synthetic user turn; agent responds on its next iteration.
+At `BeforeModelCallEvent`, guidance is appended to `event.agent.messages` as a user message. At a normal terminal boundary, `AfterInvocationEvent.resume` carries it into a resumed invocation. Both paths require another model call, so nudges, asks, and denial steering consume another turn.
 
-This is the **only** SDK-supported mechanism to inject agent-visible text mid-conversation. Implications:
-- Every nudge, ask, and deny-with-steering burns one turn from `max_turns`.
-- No "append to system prompt mid-run" primitive exists. `ClaudeAgentOptions.system_prompt` is set at construction.
-- `hookSpecificOutput.additionalContext` on PostToolUse appears in docs but does not reach the model's context; Anthropic has confirmed this as `not-planned` (GitHub issues `claude-code#18427`, `claude-code#19643`).
+### A.3 Cancellation
 
-### A.3 Mid-run cancellation
-
-`ClaudeSDKClient.interrupt()` cancels the current turn without rolling back prior tool results. Used in our cancel path along with `cancellation_requested` flag on `TaskRecord`.
+Cancellation is checked at model boundaries. `BeforeModelCallEvent.cancel` prevents the next call; terminal result mapping reports `cancelled`. Completed tool side effects are not rolled back, and an already-running model call is not synchronously interrupted.
 
 ---
 

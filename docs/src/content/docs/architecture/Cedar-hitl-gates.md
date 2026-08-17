@@ -86,20 +86,20 @@ flowchart TB
     class start startEnd
 ```
 
-Each Cedar evaluation is sub-millisecond. No network hop. No AWS API. The "approval wait" (step 3's downstream handling — polling DDB for the user's decision) is entirely inside our `PreToolUse` hook coroutine.
+Each Cedar evaluation is sub-millisecond. No network hop. No AWS API. The "approval wait" (step 3's downstream handling — polling DDB for the user's decision) is entirely inside the runtime-neutral `pre_tool_use_hook` called by Strands `BeforeToolCallEvent`.
 
-### SDK mapping
+### Strands mapping
 
-The Claude Agent SDK never sees `REQUIRE_APPROVAL`. After the approval wait resolves, the hook maps the three-outcome model back to the SDK's binary surface:
+Strands never sees `REQUIRE_APPROVAL`. After the approval wait resolves, `StrandsHooks.before_tool_call` maps the internal decision onto `BeforeToolCallEvent.cancel_tool`:
 
-| Engine outcome | SDK-visible return |
+| Engine outcome | Strands event |
 |---|---|
-| `ALLOW` (stages 2, 4) | `{"permissionDecision": "allow"}` |
-| `DENY` (stage 1 hard-deny, stage 2.5 cache hit) | `{"permissionDecision": "deny"}` |
-| `REQUIRE_APPROVAL` → user approves | `{"permissionDecision": "allow"}` |
-| `REQUIRE_APPROVAL` → user denies / timeout | `{"permissionDecision": "deny"}` |
+| `ALLOW` (stages 2, 4) | Leave `cancel_tool` unset |
+| `DENY` (stage 1 hard-deny, stage 2.5 cache hit) | Set `cancel_tool` to the sanitized reason |
+| `REQUIRE_APPROVAL` → user approves | Leave `cancel_tool` unset |
+| `REQUIRE_APPROVAL` → user denies / timeout | Set `cancel_tool` to the sanitized reason |
 
-The three-outcome model is an internal engine abstraction; the SDK surface stays binary and unchanged.
+The three-outcome model remains an internal engine abstraction; the Strands tool surface is binary: execute or cancel.
 
 ### Why not a single policy set with a custom "require approval" outcome
 
@@ -345,16 +345,16 @@ If instead the user runs `bgagent deny <task_id> <req_id> --reason "use --force-
 - Agent's poll reads DENIED row.
 - Hook execution order:
   - a. Atomic resume transition to RUNNING (same as approve path).
-  - b. **Best-effort denial injection** into agent context via the Phase-2 `between_turns_hooks` registry. The hook queues a synthetic `<user_denial nudge_id="..." timestamp="..." request_id="...">sanitized reason</user_denial>` block for the next Stop-seam injection. The `_denial_between_turns_hook` is registered AFTER `_nudge_between_turns_hook` (which itself runs after `_cancel_between_turns_hook`) — so on a task that is simultaneously denied and cancelled, the cancel short-circuits both the nudge and denial readers and the steering text does NOT reach the model. This is acceptable because:
-    - The SDK's `permissionDecisionReason` on the hook return (step d) is the guaranteed steering surface — the model always sees a terse "User denied: see next turn context for details" hint even when the between-turns injection is pre-empted by cancel.
+  - b. **Best-effort denial injection** into agent context via the runtime-neutral `between_turns_hooks` registry. The hook queues a synthetic `<user_denial nudge_id="..." timestamp="..." request_id="...">sanitized reason</user_denial>` block for the next Strands model boundary. `_denial_between_turns_hook` is registered after nudge and cancellation producers, so simultaneous cancellation can pre-empt richer steering text. This is acceptable because:
+    - `BeforeToolCallEvent.cancel_tool` carries the sanitized denial reason on the rejected tool result even when later guidance is pre-empted.
     - On a cancelled task, the agent turn terminates anyway; there is no "next turn" for the between-turns injection to act on.
     - Queued denial rows remain in DDB with status=DENIED for the 90-day audit window, so operators can retrospectively see what the user said even when the model didn't receive it.
   - c. Milestone emission: `approval_denied` (best-effort; the audit record in TaskEventsTable owned by `DenyTaskFn` is authoritative).
-  - d. Return to SDK: `{"permissionDecision": "deny", "permissionDecisionReason": "<sanitized reason, truncated to 500 chars>"}`. This is the guaranteed surface — included directly as the SDK's rejection hint so the model sees the user's intent even when the Stop-seam injection is pre-empted.
+  - d. The runtime-neutral helper returns a deny response with a truncated reason; the Strands adapter assigns that reason to `event.cancel_tool`.
 
-Why the dual path: the Claude Agent SDK's `permissionDecisionReason` reaches the model as a tool-call-rejected system hint, which the model treats as a reason-to-retry-differently signal. The Phase-2 `between_turns_hooks` mechanism injects the denial as authoritative user context, which is richer and more steerable. We use both because neither alone is sufficient: `permissionDecisionReason` is always delivered but is a terse hint; the between-turns injection is richer but can be pre-empted by a concurrent cancel. Together they cover the matrix of (tool denied, task cancelled) × (next turn runs, next turn doesn't).
+Why the dual path: the Strands tool cancellation reason reaches the model with the rejected tool call, while the between-turns mechanism injects richer user guidance before a later model call. Cancellation can pre-empt that later call, so the immediate tool reason remains necessary.
 
-**Scenario (finding #2):** A user at 3:47 AM is fighting an agent that's spiraling on a bad merge. They mash `bgagent deny 01KPW... 01KPR... --reason "stop trying to rebase, just abandon the branch"` into Terminal B, hit enter, then immediately run `bgagent cancel 01KPW...` in Terminal C because the agent is clearly lost. DenyTaskFn's transaction lands first, flipping the approval to DENIED. The agent's PreToolUse hook is already deep in the poll loop. A microsecond later the cancel arrives — the `_cancel_between_turns_hook` fires on the next Stop seam and sets the cancel flag, which short-circuits every subsequent between-turns producer including our `_denial_between_turns_hook`. The user's reason text never reaches the model as an injected turn. If we relied only on the between-turns path, the agent would have seen a bare rejection with no reason. Because `permissionDecisionReason` is set independently (step 25d) with a truncated copy of the sanitized reason, the model still receives "User denied: stop trying to rebase, just abandon the branch" at the SDK boundary. The DenyTaskFn DDB write persists the full reason for the audit log regardless of which surface the model saw. No guaranteed-context surface is lost; the stronger between-turns injection is acknowledged as best-effort.
+**Scenario (finding #2):** A user denies a force-push with a reason and immediately cancels the task. The cancellation check can prevent the queued rich guidance from starting another model call, but `event.cancel_tool` still rejects the original tool call with the sanitized denial reason. `DenyTaskFn` persists the full reason for audit regardless of whether another model turn runs.
 
 ---
 
