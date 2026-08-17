@@ -158,27 +158,6 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(true);
     });
 
-    test('classifies claude Exec-format / broken-shim as a transient image issue, not "Unexpected error"', () => {
-      // The raw run_agent failure the broken agent image produced.
-      const result = classifyError(
-        "Workflow run_agent step failed: OSError: [Errno 8] Exec format error: 'claude'",
-      );
-      expect(result!.category).toBe(ErrorCategory.COMPUTE);
-      expect(result!.title).toBe('Couldn\'t start the coding agent (environment issue)');
-      expect(result!.retryable).toBe(true);
-      // MUST be transient so retryGuidance tells the user to just reply-to-retry
-      // (and escalate to an admin only if it persists) — not the bare
-      // "Unexpected error" with no guidance it used to fall through to.
-      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
-      expect(result!.remedy).toMatch(/try again|rebuild|admin/i);
-    });
-
-    test('classifies the claude shim self-report ("native binary not installed")', () => {
-      const result = classifyError('Error: claude native binary not installed.');
-      expect(result!.category).toBe(ErrorCategory.COMPUTE);
-      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
-    });
-
     test('classifies ECS exit without terminal status', () => {
       const result = classifyError(
         'ECS task exited successfully but agent never wrote terminal status after 5 polls',
@@ -219,18 +198,18 @@ describe('classifyError', () => {
   // --- Agent errors ---
 
   describe('agent errors', () => {
-    test('classifies SDK stream ended without ResultMessage', () => {
+    test('classifies Strands stream ending without a result', () => {
       const result = classifyError(
-        'Agent SDK stream ended without a ResultMessage (agent_status=unknown). Treat as failure: possible SDK bug, network interruption, or protocol mismatch.',
+        'Strands stream ended without an AgentResult',
       );
       expect(result!.category).toBe(ErrorCategory.AGENT);
-      expect(result!.title).toBe('Agent SDK stream ended unexpectedly');
+      expect(result!.title).toBe('Agent harness stream ended unexpectedly');
       expect(result!.retryable).toBe(true);
     });
 
-    test('classifies SDK stream ended with chained error', () => {
+    test('classifies Strands stream ending with a chained error', () => {
       const result = classifyError(
-        'some prior error; Agent SDK stream ended without a ResultMessage (agent_status=unknown). Treat as failure.',
+        'some prior error; Strands stream ended without an AgentResult',
       );
       expect(result!.category).toBe(ErrorCategory.AGENT);
       expect(result!.retryable).toBe(true);
@@ -377,9 +356,9 @@ describe('classifyError', () => {
       expect(unquoted!.title).toBe('Exceeded max turns');
     });
 
-    test('classifies receive_response failure', () => {
+    test('classifies Strands invocation failure', () => {
       const result = classifyError(
-        'receive_response() failed: Connection reset by peer',
+        'Strands agent failed: ConnectionError: Connection reset by peer',
       );
       expect(result!.category).toBe(ErrorCategory.AGENT);
       expect(result!.title).toBe('Agent communication failure');
@@ -801,7 +780,7 @@ describe('classifyError', () => {
         'Pre-flight check failed: GITHUB_UNREACHABLE — timeout',
         'User concurrency limit reached',
         'Session start failed: boom',
-        'Agent SDK stream ended without a ResultMessage (agent_status=unknown).',
+        'Strands stream ended without an AgentResult',
         'Guardrail blocked: nope',
         'Blueprint config load failed: boom',
         'The model us.anthropic.claude-sonnet-4-6 is not available on your bedrock deployment.',

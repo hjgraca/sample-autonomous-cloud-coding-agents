@@ -29,9 +29,8 @@ import * as path from 'path';
  * source edit — and every doc that quotes the old value silently becomes a lie.
  * That is exactly what happened: four docs advertised a Sonnet-4.6 default long
  * after the code moved to Opus 4.8, and `agent/README.md` advertised a BARE
- * haiku id that cannot be invoked on-demand at all, contradicting the `us.`
- * -prefixed inference-profile id the stack actually deploys. Nothing guarded
- * either one, so both rotted unnoticed across several releases (#742).
+ * model id that cannot be invoked on-demand at all. Nothing guarded it, so
+ * the documentation rotted unnoticed across several releases (#742).
  *
  * `cdk/test/constructs/bedrock-models.test.ts` already proves this
  * cross-language regex-grep pattern for the code→IAM half of the invariant (the
@@ -98,9 +97,9 @@ describe('documented model defaults match the agent runtime defaults', () => {
     'agent/README.md',
   ] as const;
 
-  it.each(DOCS_WITH_ENV_TABLES)('%s documents the real ANTHROPIC_MODEL default', (docPath) => {
-    const expected = agentDefaultFor('ANTHROPIC_MODEL');
-    const documented = documentedDefaults(read(docPath), 'ANTHROPIC_MODEL');
+  it.each(DOCS_WITH_ENV_TABLES)('%s documents the real MODEL_ID default', (docPath) => {
+    const expected = agentDefaultFor('MODEL_ID');
+    const documented = documentedDefaults(read(docPath), 'MODEL_ID');
     // A doc that stops documenting the default at all is also a regression: the
     // guard would silently pass on an empty list.
     expect(documented.length).toBeGreaterThan(0);
@@ -109,22 +108,11 @@ describe('documented model defaults match the agent runtime defaults', () => {
     }
   });
 
-  it('agent/README.md documents the real ANTHROPIC_DEFAULT_HAIKU_MODEL default', () => {
-    const expected = agentDefaultFor('ANTHROPIC_DEFAULT_HAIKU_MODEL');
-    const documented = documentedDefaults(read('agent/README.md'), 'ANTHROPIC_DEFAULT_HAIKU_MODEL');
-    expect(documented.length).toBeGreaterThan(0);
-    for (const value of documented) {
-      expect(value).toBe(expected);
-    }
-  });
-
-  it('both agent defaults are inference-profile ids, not bare foundation-model ids', () => {
+  it('the agent default is an inference-profile id, not a bare foundation-model id', () => {
     // A bare `anthropic.…` id cannot be invoked with on-demand throughput
     // (Bedrock returns ValidationException), so documenting one sends readers
     // down a dead end. Guards the specific bug fixed in agent/README.md.
-    for (const envVar of ['ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL']) {
-      expect(agentDefaultFor(envVar)).toMatch(/^(us|eu|apac|global)\./);
-    }
+    expect(agentDefaultFor('MODEL_ID')).toMatch(/^(us|eu|apac|global)\./);
   });
 
   /**
@@ -142,10 +130,7 @@ describe('documented model defaults match the agent runtime defaults', () => {
    * which a row parser would follow.
    */
   it('no guarded doc presents a stale model id AS the default', () => {
-    const allowed = new Set([
-      agentDefaultFor('ANTHROPIC_MODEL'),
-      agentDefaultFor('ANTHROPIC_DEFAULT_HAIKU_MODEL'),
-    ]);
+    const allowed = new Set([agentDefaultFor('MODEL_ID')]);
     // Only lines that CLAIM to state the default are in scope. A doc legitimately
     // names other models as illustrative examples — a per-repo override snippet, a
     // cost-comparison row, "switch to a lighter model such as X" — and failing those

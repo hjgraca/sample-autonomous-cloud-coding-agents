@@ -95,16 +95,16 @@ class TestResolveOverallTaskStatus:
         )
         assert overall == "error"
         assert err is not None
-        assert "ResultMessage" in (err or "")
+        assert "terminal result" in (err or "")
         assert "unknown" in (err or "").lower()
 
     def test_unknown_merges_existing_agent_error(self):
-        ar = AgentResult(status="unknown", error="receive_response() failed: boom")
+        ar = AgentResult(status="unknown", error="Strands agent failed: boom")
         overall, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
         assert overall == "error"
         assert err is not None
-        assert "receive_response() failed: boom" in err
-        assert "ResultMessage" in err
+        assert "Strands agent failed: boom" in err
+        assert "terminal result" in err
 
     def test_error_status_without_message_gets_default(self):
         ar = AgentResult(status="error", error=None)
@@ -114,7 +114,7 @@ class TestResolveOverallTaskStatus:
         assert "agent_status='error'" in err
 
     def test_error_promotes_latched_blocker_reason(self):
-        # #251 carry-path: a hook-detected blocker with no SDK error message is
+        # #251 carry-path: a hook-detected blocker with no harness error message is
         # promoted into the terminal reason so the CDK classifier gives a remedy.
         _record_blocker_reason("egress_denied", "blocked host", resource="pypi.org")
         ar = AgentResult(status="error", error=None)
@@ -123,31 +123,31 @@ class TestResolveOverallTaskStatus:
         assert err == "BLOCKED[egress_denied]: blocked host (resource: pypi.org)"
 
     def test_specific_agent_error_wins_over_latched_blocker(self):
-        # A concrete SDK error must NOT be overwritten by the latch.
+        # A concrete harness error must NOT be overwritten by the latch.
         _record_blocker_reason("egress_denied", "blocked host", resource="pypi.org")
-        ar = AgentResult(status="error", error="receive_response() failed: boom")
+        ar = AgentResult(status="error", error="Strands agent failed: boom")
         overall, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
         assert overall == "error"
-        assert err == "receive_response() failed: boom"
+        assert err == "Strands agent failed: boom"
 
     def test_unknown_status_promotes_latched_blocker(self):
         # An egress denial that kills outbound calls is a likely cause of a
-        # missing ResultMessage (agent_status=unknown). The precise blocker
-        # reason must win over the generic SDK-no-result message.
+        # missing terminal result (agent_status=unknown). The precise blocker
+        # reason must win over the generic harness-no-result message.
         _record_blocker_reason("egress_denied", "blocked host", resource="pypi.org")
         ar = AgentResult(status="unknown", error=None)
         overall, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
         assert overall == "error"
         assert err == "BLOCKED[egress_denied]: blocked host (resource: pypi.org)"
 
-    def test_unknown_status_without_blocker_uses_sdk_message(self):
+    def test_unknown_status_without_blocker_uses_harness_message(self):
         ar = AgentResult(status="unknown", error=None)
         overall, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
         assert overall == "error"
-        assert "ResultMessage" in (err or "")
+        assert "terminal result" in (err or "")
 
     def test_error_status_preserves_bedrock_entitlement_message(self):
-        """Runner maps ResultMessage.is_error to agent_status=error; pipeline must fail."""
+        """The harness maps model access errors to agent_status=error; pipeline must fail."""
         ar = AgentResult(
             status="error",
             error=(
@@ -338,7 +338,7 @@ class TestMaxTurnsStuckEnrichment:
         import hooks
 
         monkeypatch.setattr(hooks, "last_stuck_summary", lambda: "last tool calls repeated: X")
-        ar = AgentResult(status="error", error="receive_response() failed: boom")
+        ar = AgentResult(status="error", error="Strands agent failed: boom")
         _, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
         assert err is not None
         assert "last tool calls repeated" not in err

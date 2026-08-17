@@ -107,15 +107,14 @@ Beyond per-task descriptions, you can customize how the agent works on your repo
 
 | File / directory | Purpose |
 |---|---|
-| `CLAUDE.md` or `.claude/CLAUDE.md` | Project-level instructions (build commands, conventions, constraints, architecture) |
-| `.claude/rules/*.md` | Path-scoped rules (e.g. `testing.md`, `api-conventions.md`) |
-| `.claude/settings.json` | Project settings (hooks, env vars). Permissions have no effect since the agent runs in `bypassPermissions` mode. |
-| `.claude/agents/` | Custom subagent definitions |
-| `.mcp.json` | MCP server configurations (requires dependencies installed in the container) |
+| `AGENTS.md` | Project-level instructions (build commands, conventions, constraints, architecture) |
+| `.agents` or `.agents/*.md` | Additional repository guidance |
+| `.mcp.json` | MCP server configurations loaded through Strands (server dependencies must be available in the container) |
+| `CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules/*.md` | Legacy fallback instructions, loaded only when no `AGENTS.md`/`.agents` guidance exists |
 
-These files use the same format as [Claude Code's CLAUDE.md](https://code.claude.com/docs/en/memory#claude-md-files). A good `CLAUDE.md` is the single most impactful thing you can add - it prevents the agent from guessing and reduces wasted turns.
+A concise `AGENTS.md` is the most impactful repository-level input: it prevents the agent from guessing and reduces wasted turns. When any modern instruction source exists, legacy files are ignored to avoid contradictory guidance.
 
-Example `CLAUDE.md`:
+Example `AGENTS.md`:
 
 ```markdown
 # Project instructions

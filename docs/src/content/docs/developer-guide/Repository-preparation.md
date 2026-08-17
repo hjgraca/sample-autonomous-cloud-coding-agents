@@ -73,7 +73,7 @@ Redeploy after changing Blueprints: `mise //cdk:deploy`.
 
 ### Customizing the agent image
 
-The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `gh`, Claude Code CLI, and `mise`. If your repositories need additional runtimes (Java, Go, native libs), extend the Dockerfile. A normal `cdk deploy` rebuilds the image asset.
+The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `gh`, and `mise`. The Python environment includes the Strands agent harness. If your repositories need additional runtimes (Java, Go, native libs), extend the Dockerfile. A normal `cdk deploy` rebuilds the image asset.
 
 ### Writing Cedar policies for the repo
 
@@ -84,4 +84,4 @@ See the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/
 ### Other options
 
 - **Stack name** - The default is `backgroundagent-dev` (set in `cdk/src/main.ts`). If you rename it, update all `--stack-name` references.
-- **Making repos agent-friendly** - Add `CLAUDE.md`, `.claude/rules/`, and clear build commands. See the [Prompt guide](/sample-autonomous-cloud-coding-agents/customizing/prompt-engineering#repo-level-instructions) for details.
+- **Making repos agent-friendly** - Add `AGENTS.md` or `.agents/` guidance and clear build commands. Legacy `CLAUDE.md` and `.claude/rules/` files remain fallback inputs when no modern instruction source exists. See the [Prompt guide](/sample-autonomous-cloud-coding-agents/customizing/prompt-engineering#repo-level-instructions) for details.

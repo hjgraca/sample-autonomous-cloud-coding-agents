@@ -214,9 +214,8 @@ export class EcsComputeStrategy implements ComputeStrategy {
       // turn ceiling that depends on which code path filled it in is a bug.
       { name: 'MAX_TURNS', value: String(payload.max_turns ?? DEFAULT_MAX_TURNS) },
       ...(payload.max_budget_usd !== undefined ? [{ name: 'MAX_BUDGET_USD', value: String(payload.max_budget_usd) }] : []),
-      ...(blueprintConfig.model_id ? [{ name: 'ANTHROPIC_MODEL', value: blueprintConfig.model_id }] : []),
+      ...(blueprintConfig.model_id ? [{ name: 'MODEL_ID', value: blueprintConfig.model_id }] : []),
       ...(blueprintConfig.system_prompt_overrides ? [{ name: 'SYSTEM_PROMPT_OVERRIDES', value: blueprintConfig.system_prompt_overrides }] : []),
-      { name: 'CLAUDE_CODE_USE_BEDROCK', value: '1' },
       // Prefer the S3 pointer; fall back to the inline payload when no bucket is
       // configured (keeps small-payload / AgentCore-only deployments working with
       // no behavior change).
@@ -234,7 +233,7 @@ export class EcsComputeStrategy implements ComputeStrategy {
     //    inline AGENT_PAYLOAD env var (fallback).
     // 2. Calls entrypoint.run_task_from_payload(p), which maps the WHOLE payload
     //    dict to run_task's signature (rename prompt→task_description /
-    //    model_id→anthropic_model, filter to accepted params, coerce str/int).
+    //    prompt→task_description, filter to accepted params, coerce str/int).
     //    This replaces an older hand-listed kwarg subset that silently dropped
     //    fields such as channel_source/channel_metadata (which meant no
     //    Linear/Jira reactions or channel MCP on ECS), build_command,

@@ -46,7 +46,7 @@ flowchart TB
 | `task.pipeline` | Root span: end-to-end task execution |
 | `task.context_hydration` | GitHub issue fetch + prompt assembly |
 | `task.repo_setup` | Clone, branch, mise install, initial build |
-| `task.agent_execution` | Claude Agent SDK invocation |
+| `task.agent_execution` | Strands agent and Bedrock invocation loop |
 | `task.post_hooks` | Safety-net commit, build/lint verification, PR creation |
 
 Root span attributes (`task.id`, `repo.url`, `agent.model`, `agent.cost_usd`, `build.passed`, `pr.url`, etc.) enable CloudWatch querying and filtering.

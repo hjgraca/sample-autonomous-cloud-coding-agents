@@ -22,7 +22,7 @@ Why a signed app proxy instead of MCP: Atlassian's Remote MCP
 authorization flow with dynamic client registration — it does NOT accept the
 stored Jira REST OAuth token as a ``Bearer`` header, and a headless background
 agent cannot complete the interactive handshake. The MCP path therefore fails
-to connect in the runtime (``claude mcp list`` → "Failed to connect").
+to connect in the headless runtime.
 Configured tenants call a narrow HMAC-authenticated Forge web trigger, which
 uses ``api.asApp().requestJira`` so Jira attributes writes to the app account.
 Tenants without Forge configuration retain the user-delegated OAuth REST path

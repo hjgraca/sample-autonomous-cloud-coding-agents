@@ -30,10 +30,9 @@ class TestRunTaskFromPayload:
     def test_renames_prompt_and_model_id(self):
         seen = _capture({"prompt": "do the thing", "model_id": "anthropic.claude-x"})
         assert seen["task_description"] == "do the thing"
-        assert seen["anthropic_model"] == "anthropic.claude-x"
-        # The original payload keys must NOT leak through as-is (run_task rejects them).
+        assert seen["model_id"] == "anthropic.claude-x"
+        # Only the differently named prompt key is removed; model_id is end-to-end.
         assert "prompt" not in seen
-        assert "model_id" not in seen
 
     def test_forwards_every_channel_field_to_the_agent(self):
         # THE regression: channel_source/channel_metadata must reach run_task so

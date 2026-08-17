@@ -82,10 +82,8 @@ def build_session_tags(user_id: str, repo: str, task_id: str) -> list[dict[str, 
     """Build the AssumeRole ``Tags`` list from tenant identifiers.
 
     Only non-empty values are included. Values are truncated to the IAM limit
-    so an over-long repo slug can never make ``AssumeRole`` fail. Shared by the
-    in-process tenant-data session (:func:`_session_tags`) and the out-of-process
-    Bedrock credential helper (``bedrock_creds_helper.py``) so both mint the
-    same ``{user_id, repo, task_id}`` tags from one definition.
+    so an over-long repo slug can never make ``AssumeRole`` fail. The same
+    scoped session is used for tenant data and direct Strands Bedrock calls.
     """
     pairs = (("user_id", user_id), ("repo", repo), ("task_id", task_id))
     return [{"Key": key, "Value": value[:_MAX_TAG_VALUE_LEN]} for key, value in pairs if value]
@@ -128,8 +126,7 @@ def _session_tags() -> list[dict[str, str]]:
     return [{"Key": key, "Value": value[:_MAX_TAG_VALUE_LEN]} for key, value in _tags.items()]
 
 
-# Public alias of the IAM tag-value length cap, for the Bedrock credential
-# helper which builds tags from CLI args rather than module state.
+# Public alias of the IAM tag-value length cap for callers validating tags.
 MAX_TAG_VALUE_LEN = _MAX_TAG_VALUE_LEN
 
 

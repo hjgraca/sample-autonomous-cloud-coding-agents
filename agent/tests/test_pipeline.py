@@ -819,7 +819,7 @@ class TestResolveOverallTaskStatus:
         status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url="https://pr")
         assert status == "error"
         assert err is not None
-        assert "ResultMessage" in err
+        assert "terminal result" in err
 
     def test_unknown_with_prior_error_chains(self):
         ar = AgentResult(status="unknown", error="connection reset")
@@ -827,7 +827,7 @@ class TestResolveOverallTaskStatus:
         assert status == "error"
         assert err is not None
         assert "connection reset" in err
-        assert "ResultMessage" in err
+        assert "terminal result" in err
 
     def test_error_status_preserves_agent_error(self):
         ar = AgentResult(status="error", error="OOM killed")
@@ -847,7 +847,7 @@ class TestResolveOverallTaskStatus:
         status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
         assert status == "error"
         assert err is not None
-        assert "ResultMessage" in err
+        assert "terminal result" in err
 
     def test_success_preserves_existing_error(self):
         """If agent reports success with a non-fatal error, it's preserved on success."""

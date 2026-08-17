@@ -149,7 +149,7 @@ _AGENT_ENV_VARS = [
     "REPO_URL",
     "ISSUE_NUMBER",
     "TASK_DESCRIPTION",
-    "ANTHROPIC_MODEL",
+    "MODEL_ID",
     "MAX_TURNS",
     "MAX_BUDGET_USD",
     "DRY_RUN",

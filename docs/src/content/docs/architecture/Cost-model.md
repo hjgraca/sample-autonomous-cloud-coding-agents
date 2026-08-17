@@ -92,12 +92,12 @@ These estimates assume Claude Sonnet with prompt caching enabled and average tas
 
 For multi-user deployments, cost should be attributable to individual users and repositories:
 
-- **Per-task:** Token usage and compute duration are captured in task metadata (`agent.cost_usd`, `agent.turns`  - see [OBSERVABILITY.md](/sample-autonomous-cloud-coding-agents/architecture/observability)). Note: `agent.cost_usd` is the Claude Agent SDK's **client-side estimate** (a build-time price table), not authoritative billing — use it for guardrails, and AWS Cost Explorer / CUR 2.0 for the real bill (see [COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution)).
+- **Per-task:** Token usage and compute duration are captured in task metadata (`agent.cost_usd`, `agent.turns` - see [OBSERVABILITY.md](/sample-autonomous-cloud-coding-agents/architecture/observability)). `agent.cost_usd` is the Strands harness's **client-side estimate**, calculated from Bedrock token metrics and `agent/src/model_pricing.py`; it is not authoritative billing. Budgeted tasks reject models absent from that table before invocation. Use AWS Cost Explorer / CUR 2.0 for the real bill (see [COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution)).
 - **Per-user:** Aggregate task costs by `user_id`.
 - **Per-repo:** Aggregate task costs by `repo`.
 - **Dashboard:** Cost attribution dashboards should be built from the same task-level metrics.
 
-For **AWS-native** chargeback of Bedrock spend (Cost Explorer / CUR 2.0 by `user_id` / `repo`, plus per-call invocation-log forensics) — beyond the in-app `cost_usd` meter above — see the operator guide [COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution) and the platform design [BEDROCK_COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/architecture/bedrock-cost-attribution).
+For **AWS-native** chargeback of Bedrock spend (Cost Explorer / CUR 2.0 by `user_id` / `repo`) beyond the in-app `cost_usd` meter, see the operator guide [COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution) and the platform design [BEDROCK_COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/architecture/bedrock-cost-attribution). Bedrock invocation logs are available for model/token diagnostics but are not currently stamped with ABCA task metadata.
 
 ## Cost guardrails (current)
 

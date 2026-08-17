@@ -154,7 +154,7 @@ flowchart LR
 | Hydration | Budget/quota resolution | `orchestrator.ts` | Persisted on task record |
 | Execution | Tool-call policy (Cedar) | `agent/src/hooks.py`, `agent/src/policy.py` | `POLICY_DECISION` telemetry |
 | Execution | Output secret screening | `agent/src/output_scanner.py` | `OUTPUT_SCREENING` telemetry |
-| Execution | Turn/cost budget | Claude Agent SDK | Cost in task result |
+| Execution | Turn/cost budget | Strands lifecycle hooks + local pricing table | Cost in task result |
 | Finalization | Build/lint verification | `agent/src/post_hooks.py` | Task record and PR body |
 | Infrastructure | DNS Firewall, WAF | CDK constructs | CloudWatch logs |
 
@@ -164,10 +164,10 @@ flowchart LR
 
 Once an agent session starts, two mechanisms enforce policy without requiring an external sidecar:
 
-**Tool-call interceptor (Guardian pattern).** A Cedar-based policy engine (`agent/src/policy.py`) evaluates tool calls via the Claude Agent SDK's hook system:
+**Tool-call interceptor (Guardian pattern).** A Cedar-based policy engine (`agent/src/policy.py`) evaluates tool calls through typed Strands lifecycle hooks:
 
-- **Pre-execution** (PreToolUse hook) - Validates tool inputs before execution. `pr_review` agents cannot use `Write`/`Edit`. Writes to `.git/*` are blocked. Destructive bash commands are denied. Fail-closed: if Cedar is unavailable, all calls are denied. Per-repo custom Cedar policies are supported via Blueprint `security.cedarPolicies`.
-- **Post-execution** (PostToolUse hook) - Screens tool outputs for secrets (AWS keys, GitHub tokens, private keys, connection strings). Detected secrets are redacted before re-entering the agent context (steered enforcement, not blocking).
+- **Pre-execution** (`BeforeToolCallEvent`) - Validates tool inputs before execution. `pr_review` agents cannot use write tools. Writes to `.git/*` are blocked. Destructive shell commands are denied. Neutral tool names map to the existing Cedar action vocabulary, preserving policy compatibility. Fail-closed: if policy evaluation crashes, the tool call is cancelled. Per-repo custom Cedar policies are supported via Blueprint `security.cedarPolicies`.
+- **Post-execution** (`AfterToolCallEvent`) - Screens tool outputs for secrets (AWS keys, GitHub tokens, private keys, connection strings). Detected secrets are replaced before re-entering the agent context.
 
 **Behavioral circuit breaker.** Monitors tool-call patterns within a session: call frequency, cumulative cost, repeated failures, and file mutation rate. When thresholds are exceeded (e.g. >50 calls/min, >$10 cost, >5 consecutive failures), the session is paused or terminated. Thresholds are configurable per-repo via Blueprint `security` props.
 

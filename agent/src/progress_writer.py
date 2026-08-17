@@ -670,7 +670,7 @@ class _ProgressWriter:
         output_tokens: int,
         turn: int,
     ) -> None:
-        """Emit an ``agent_cost_update`` event after each ResultMessage."""
+        """Emit an ``agent_cost_update`` event after each model turn."""
         self._put_event(
             "agent_cost_update",
             {

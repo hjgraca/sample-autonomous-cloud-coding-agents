@@ -236,7 +236,7 @@ const RESERVED_BUILD_ENV_KEYS = new Set([
   'ECS_PAYLOAD_BUCKET',
   'ARTIFACTS_BUCKET_NAME',
   'AGENT_SESSION_ROLE_ARN',
-  'CLAUDE_CODE_USE_BEDROCK',
+  'MODEL_ID',
   'AWS_REGION',
 ]);
 
@@ -368,7 +368,6 @@ export class EcsAgentCluster extends Construct {
     // is a build-tier concern (a read-only planner never runs the post-agent build
     // verify), so it's set per-def below, not here.
     const baseEnvironment: Record<string, string> = {
-      CLAUDE_CODE_USE_BEDROCK: '1',
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,

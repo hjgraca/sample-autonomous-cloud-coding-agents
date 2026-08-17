@@ -106,7 +106,6 @@ describe('EcsComputeStrategy', () => {
         { name: 'TASK_DESCRIPTION', value: 'Fix the bug' },
         { name: 'ISSUE_NUMBER', value: '42' },
         { name: 'MAX_TURNS', value: '50' },
-        { name: 'CLAUDE_CODE_USE_BEDROCK', value: '1' },
       ]));
 
       // No ECS_PAYLOAD_BUCKET in this module's env → inline fallback (#502): the
@@ -180,7 +179,7 @@ describe('EcsComputeStrategy', () => {
       const call = mockSend.mock.calls[0][0];
       const envVars = call.input.overrides.containerOverrides[0].environment;
       expect(envVars).toEqual(expect.arrayContaining([
-        { name: 'ANTHROPIC_MODEL', value: 'anthropic.claude-sonnet-4-6' },
+        { name: 'MODEL_ID', value: 'anthropic.claude-sonnet-4-6' },
         { name: 'SYSTEM_PROMPT_OVERRIDES', value: 'Be concise' },
       ]));
     });

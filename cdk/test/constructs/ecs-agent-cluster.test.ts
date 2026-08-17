@@ -318,8 +318,7 @@ describe('EcsAgentCluster construct', () => {
     expect(planningDef).toBeDefined();
     const env = planningDef!.Properties.ContainerDefinitions[0].Environment ?? [];
     expect(env.some((e: { Name: string }) => e.Name === 'BUILD_VERIFY_TIMEOUT_S')).toBe(false);
-    // …but the shared env (Bedrock, task table) IS present on the planning def too.
-    expect(env.some((e: { Name: string }) => e.Name === 'CLAUDE_CODE_USE_BEDROCK')).toBe(true);
+    // The shared task-table environment is present on the planning definition.
     expect(env.some((e: { Name: string }) => e.Name === 'TASK_TABLE_NAME')).toBe(true);
   });
 
@@ -475,7 +474,6 @@ describe('EcsAgentCluster construct', () => {
         Match.objectLike({
           Name: 'AgentContainer',
           Environment: Match.arrayWith([
-            Match.objectLike({ Name: 'CLAUDE_CODE_USE_BEDROCK', Value: '1' }),
             Match.objectLike({ Name: 'TASK_TABLE_NAME', Value: Match.anyValue() }),
             Match.objectLike({ Name: 'TASK_EVENTS_TABLE_NAME', Value: Match.anyValue() }),
             Match.objectLike({ Name: 'USER_CONCURRENCY_TABLE_NAME', Value: Match.anyValue() }),

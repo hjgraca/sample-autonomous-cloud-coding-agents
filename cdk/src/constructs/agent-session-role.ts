@@ -72,14 +72,15 @@ export interface AgentSessionRoleProps {
    * SessionRole — the **same** grant the compute role receives, so the
    * permission set (including the all-regions foundation-model ARNs a
    * cross-region profile fans out to) stays in lockstep and a cross-region
-   * route can never AccessDenied. Model inference run by the Claude Code
-   * subprocess is then attributed per `{user_id, repo}` in CUR 2.0 / Cost
-   * Explorer via the session tags this role already carries.
+   * route can never AccessDenied. Strands receives the task-scoped boto
+   * session directly, attributing model inference per `{user_id, repo}` in
+   * CUR 2.0 / Cost Explorer via the session tags this role already carries.
    *
-   * The compute role keeps its own Bedrock grant: attribution is a billing
-   * control that fails open (the credential helper falls back to compute-role
-   * creds if the assume-role fails), so model invocation never depends on this.
-   * Omit (e.g. isolated construct tests) to skip the Bedrock grant.
+   * The compute role keeps its own Bedrock grant for deployments that do not
+   * configure a SessionRole. When a SessionRole is configured, failure to
+   * establish the scoped session aborts the task rather than invoking Bedrock
+   * with unscoped credentials. Omit (e.g. isolated construct tests) to skip
+   * the Bedrock grant.
    */
   readonly invokableModels?: bedrock.IBedrockInvokable[];
 }
@@ -105,10 +106,9 @@ export interface AgentSessionRoleProps {
  *
  * CloudWatch Logs remains on the compute role (shared, non-tenant access). The
  * compute role *also* keeps `InvokeModel`; this role adds a parallel, session-
- * tagged Bedrock grant (#215) used by the Claude Code subprocess for cost
- * attribution. Long-task safety on the 1-hour-capped chained session is handled
- * by Claude Code's `awsCredentialExport` refresh, and the helper falls back to
- * the compute role if assume fails — so model invocation never breaks.
+ * tagged Bedrock grant (#215) used by the Strands Bedrock client for cost
+ * attribution. Botocore refreshable credentials re-assume the 1-hour-capped
+ * chained session before expiry.
  */
 export class AgentSessionRole extends Construct {
   /** Actions sufficient for the agent's DynamoDB access. Excludes Scan. */
@@ -216,8 +216,8 @@ export class AgentSessionRole extends Construct {
     // Reuse grantInvoke so this role's Bedrock permissions exactly mirror the
     // compute role's (cross-region profiles fan out to the foundation model in
     // every routed region — replicating that by hand would risk an AccessDenied
-    // on a cross-region route). Claude Code assumes this role (via its
-    // awsCredentialExport helper) so InvokeModel rides the session's
+    // on a cross-region route). Strands receives the refreshable scoped boto
+    // session directly, so InvokeModel rides the session's
     // {user_id, repo, task_id} tags, surfacing per-user/repo Bedrock spend in
     // CUR 2.0 / Cost Explorer. No PrincipalTag condition: the tags are for
     // billing attribution, not access scoping, so a condition would add no

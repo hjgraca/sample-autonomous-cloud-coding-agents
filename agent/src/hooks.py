@@ -1,4 +1,4 @@
-"""PreToolUse, PostToolUse, and Stop hook callbacks.
+"""Runtime-neutral policy, output-screening, and between-turn callbacks.
 
 - PreToolUse: three-outcome Cedar policy enforcement (ALLOW / DENY /
   REQUIRE_APPROVAL). The REQUIRE_APPROVAL path writes a pending approval
@@ -6,14 +6,13 @@
   human decision, then resumes / denies per the user's input. See
   ``docs/design/CEDAR_HITL_GATES.md``.
 - PostToolUse: output scanner for secrets/PII.
-- Stop: between-turns hook dispatcher. Cancel → nudge → denial injection
+- Between turns: hook dispatcher. Cancel → nudge → denial injection
   in that order (cancel-wins semantics). Each producer appends synthetic
-  user-message strings that get reinjected via the SDK's
-  ``decision: "block"`` mechanism.
+  user-message strings that the Strands adapter adds before a model call.
 
 A module-level registry ``between_turns_hooks`` lets other producers
 (nudges, denial injections) append additional synthetic-message
-producers without touching the Stop hook callback itself.
+producers without touching the dispatcher itself.
 """
 
 from __future__ import annotations
@@ -253,8 +252,7 @@ def _allow_response(reason: str = "permitted") -> dict:
 # stacked child, the successor had no branch to stack on. The industry norm is a
 # filesystem sandbox that makes a divergent clone impossible; lacking that (raw
 # Bash + bypassPermissions + open GitHub egress), a harness-enforced deny of the
-# re-clone is the closest robust analog — and Claude Code hook denies fire even
-# under bypassPermissions and survive prompt-injection. We match ONLY a re-clone
+# re-clone is the closest robust analog. We match ONLY a re-clone
 # of the TASK's OWN repo (not legitimate dependency/submodule clones), keyed off
 # the ``owner/repo`` slug in any of the URL forms gh/git accept.
 #
@@ -415,7 +413,7 @@ async def pre_tool_use_hook(
     # is a JSON object. A bare list/scalar (e.g. ``"[1,2]"`` or ``"\"foo\""``
     # decoded by the branch above, or a non-dict passed in directly) would
     # otherwise raise an AttributeError deep in the engine and rely on the
-    # SDK-boundary wrapper to catch it. Make the rejection explicit here so
+    # lifecycle adapter to catch it. Make the rejection explicit here so
     # the deny reason names the malformed input rather than a stack trace.
     if not isinstance(tool_input, dict):
         log("WARN", f"PreToolUse hook received non-dict tool_input — denying {tool_name}")
@@ -1492,7 +1490,7 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
     if engine is None:
         return []
     # ``drain_denial_injections`` clears the queue; this is deliberate
-    # so a transient SDK failure that drops the injection does not
+    # so a transient runtime failure that drops the injection does not
     # re-inject the same denial on every subsequent Stop seam.
     try:
         pending = engine.drain_denial_injections()
@@ -1535,7 +1533,7 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
 
     Reads the task record from DynamoDB each turn.  If ``status == "CANCELLED"``
     sets ``ctx["_cancel_requested"] = True`` so :func:`stop_hook` returns
-    ``continue_=False`` and the SDK tears the agent down cleanly.
+    ``continue_=False`` and the Strands adapter cancels the next model call.
 
     Fail-open: a ``TaskFetchError`` (transient DDB failure) is treated as
     "no cancel detected" to avoid stranding running tasks on blips.  This is
@@ -1543,7 +1541,7 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
     Worst case a cancel is missed for one turn; the next turn will catch it.
 
     Returns ``[]`` always — the cancel signal flows via the ctx sentinel, not
-    via injected text.  Injecting text would cause the SDK to continue the
+    via injected text. Injecting text would cause Strands to continue the
     conversation, which is the opposite of what cancel needs.
     """
     task_id = ctx.get("task_id") or ""
@@ -1573,7 +1571,7 @@ def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
     enough times in a row, the guard returns a ``steer`` action — a ONE-TIME
     advisory message telling the agent to stop retrying and either work around
     the failure or finish with what it has. Returned as injected text, so the
-    SDK continues the turn with the steer as the next user message.
+    Strands continues with the steer as the next user message.
 
     ADVISORY ONLY: the guard never kills the task (the bail path was removed —
     distinguishing a true spin from a legitimately-iterating agent is too
@@ -1642,16 +1640,15 @@ async def stop_hook(
     engine: Any = None,
     stuck_guard: Any = None,
 ) -> dict:
-    """Stop hook: run registered between-turns hooks; block if they produce text.
+    """Run registered between-turns hooks and return generated guidance.
 
-    Returning ``{"decision": "block", "reason": "<text>"}`` tells the SDK to
-    continue the conversation with *text* as the next user message rather
-    than actually stopping.  If no hook produces text we return an empty
-    dict (allow stop).
+    ``StrandsHooks`` consumes ``{"decision": "block", "reason": "<text>"}``
+    and appends *text* as the next user message. If no hook produces text,
+    this returns an empty dict.
 
     Each between-turns hook is invoked via ``asyncio.to_thread`` so that
     sync boto3 calls inside the hook (DDB query + update) do not stall the
-    asyncio loop driving ``client.receive_response()``.
+    asyncio loop driving the Strands invocation.
 
     ``progress`` is an optional writer ref threaded into each hook's ``ctx``
     so hooks can emit their own milestone / progress events without holding
@@ -1702,7 +1699,7 @@ async def stop_hook(
             break
 
     # Cancel takes precedence over nudge injection.  ``continue_: False`` tells
-    # the SDK to end the turn loop and return control to the caller, which
+    # Strands to end the turn loop and return control to the caller, which
     # lets the pipeline see the CANCELLED status and skip post-hooks.
     if ctx.get("_cancel_requested"):
         return {
@@ -1725,27 +1722,30 @@ def build_hook_matchers(
     user_id: str = "",
     repo_url: str = "",
 ) -> dict:
-    """Build hook matchers dict for ClaudeAgentOptions.
+    """Build legacy hook matchers for callers not yet on typed lifecycle hooks.
 
-    Returns a dict mapping HookEvent strings to lists of HookMatcher
-    instances, ready to pass as ``hooks=...`` to ClaudeAgentOptions.
+    Returns a dict mapping legacy event strings to callback matchers.
 
-    The SDK expects ``dict[HookEvent, list[HookMatcher]]`` where HookMatcher
-    has ``matcher: str | None`` and ``hooks: list[HookCallback]``.
+    The return shape is retained for tests and callers migrating from the
+    string-keyed compatibility protocol. Production uses ``StrandsHooks``.
 
     ``progress`` is forwarded to both the PreToolUse hook (approval gate
     milestones) and the Stop hook (nudge/denial acks). ``user_id`` is
     written onto the approval row so ownership checks on the REST side
     can enforce that a user can only approve their own gates.
     """
-    from claude_agent_sdk.types import (
-        HookContext,
-        HookInput,
-        HookJSONOutput,
-        HookMatcher,
-        PostToolUseHookSpecificOutput,
-        SyncHookJSONOutput,
-    )
+    from dataclasses import dataclass
+
+    HookContext = dict[str, Any]
+    HookInput = dict[str, Any]
+    HookJSONOutput = dict[str, Any]
+    PostToolUseHookSpecificOutput = dict[str, Any]
+    SyncHookJSONOutput = dict
+
+    @dataclass
+    class HookMatcher:
+        matcher: str | None
+        hooks: list[Any]
 
     # One stuck-guard per task (== per build_hook_matchers call). The
     # PostToolUse closure feeds it every tool result; the Stop closure reads it
@@ -1760,10 +1760,10 @@ def build_hook_matchers(
         # Fail-closed wrapper (mirrors _post and _stop). If the inner hook
         # or its dispatch path raises an unexpected exception (asyncio
         # cancellation, TypeError from a malformed payload, etc.), the
-        # SDK's default behaviour for an unhandled hook exception is
-        # undefined — we MUST NOT trust it to fail closed. Mapping every
+        # compatibility caller's behaviour for an unhandled hook exception is
+        # undefined. Mapping every
         # uncaught exception to a DENY here makes the security posture
-        # explicit at the SDK boundary.
+        # explicit at the adapter boundary.
         try:
             result = await pre_tool_use_hook(
                 hook_input,

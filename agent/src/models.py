@@ -154,12 +154,7 @@ class TaskConfig(BaseModel):
     task_description: str = ""
     github_token: str = ""
     aws_region: str
-    anthropic_model: str = "us.anthropic.claude-opus-4-8"
-    # The "small/fast" model Claude Code uses for auxiliary work (e.g. WebFetch
-    # page summarization). Must be a cross-region INFERENCE-PROFILE id (``us.``
-    # prefix), not a bare foundation-model id — Claude 4.x cannot be invoked
-    # on-demand by bare id on Bedrock. Threaded to ANTHROPIC_DEFAULT_HAIKU_MODEL.
-    haiku_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    model_id: str = "us.anthropic.claude-opus-4-8"
     dry_run: bool = False
     max_turns: int = 10
     max_budget_usd: float | None = None
@@ -185,10 +180,10 @@ class TaskConfig(BaseModel):
     # hard-deny Write/Edit rules fire for *any* read-only workflow, and drives the
     # runner's allowed_tools tightening.
     read_only: bool = False
-    # The SDK tool surface for this task, from the resolved workflow's
+    # The harness tool surface for this task, from the resolved workflow's
     # ``agent_config.allowed_tools``. This is the second enforcement layer
-    # alongside ``read_only``: ``run_agent`` passes it to
-    # ``ClaudeAgentOptions.allowed_tools`` verbatim, and drops ``Write``/``Edit``
+    # alongside ``read_only``: ``run_agent`` passes it to the harness and drops
+    # ``Write``/``Edit``
     # when ``read_only`` is true. Empty list means "fall back to the built-in
     # full surface" so legacy/batch callers that never resolved a workflow keep
     # working unchanged; a workflow that wants to restrict tools MUST declare a
@@ -361,7 +356,7 @@ class AgentResult(BaseModel):
     session_id: str = ""
     error: str | None = None
     usage: TokenUsage | None = None
-    # The agent's final result text (ResultMessage.result on success). For a
+    # The agent's final response text from a successful harness run. For a
     # repo-less knowledge task this IS the deliverable that deliver_artifact
     # uploads/posts. Empty for coding tasks (their product is the PR, not the
     # text).
@@ -387,12 +382,11 @@ class TaskResult(BaseModel):
     build_passed: bool | None = None
     lint_passed: bool | None = None
     cost_usd: float | None = None
-    # Historically the `turns` field was set to the SDK's
-    # `ResultMessage.num_turns`, which INCLUDES the attempted turn that
-    # tripped a cap (so `max_turns=6` yields `turns=7` under
-    # `agent_status='error_max_turns'`). That confused operators. We
-    # now expose both fields explicitly:
-    #   * `turns_attempted` — the SDK's authoritative counter (ex-`turns`).
+    # Historically the `turns` field included the attempted turn that tripped
+    # a cap (so `max_turns=6` could yield `turns=7` under
+    # `agent_status='error_max_turns'`). That confused operators. We now expose
+    # both fields explicitly:
+    #   * `turns_attempted` — the harness's authoritative counter (ex-`turns`).
     #   * `turns_completed` — clamped to max_turns when we know the cap
     #     fired; otherwise equals `turns_attempted`.
     # The legacy `turns` field is retained (= `turns_attempted`) so

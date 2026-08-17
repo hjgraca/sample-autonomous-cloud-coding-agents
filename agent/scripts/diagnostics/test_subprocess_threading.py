@@ -4,7 +4,7 @@ Simulates the exact server.py → entrypoint.py architecture:
   - Main thread runs an asyncio event loop (like uvicorn)
   - Background thread runs sync work, then async subprocess I/O
 
-Tests both Python and Node.js child processes (the actual Claude Code CLI
+Tests both Python and Node.js child processes (the target-repository tooling
 is Node.js, whose stdout buffering behaviour may differ from Python).
 
 Run locally:     python agent/scripts/diagnostics/test_subprocess_threading.py

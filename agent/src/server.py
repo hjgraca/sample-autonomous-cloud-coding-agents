@@ -384,7 +384,7 @@ def _run_task_background(
     task_description: str,
     issue_number: str,
     github_token: str,
-    anthropic_model: str,
+    model_id: str,
     max_turns: int,
     max_budget_usd: float | None,
     aws_region: str,
@@ -476,7 +476,7 @@ def _run_task_background(
             task_description=task_description,
             issue_number=issue_number,
             github_token=github_token,
-            anthropic_model=anthropic_model,
+            model_id=model_id,
             max_turns=max_turns,
             max_budget_usd=max_budget_usd,
             aws_region=aws_region,
@@ -532,10 +532,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         or inp.get("task_description", "")
         or os.environ.get("TASK_DESCRIPTION", "")
     )
-    # Fix: orchestrator sends "model_id", not "anthropic_model"
-    anthropic_model = (
-        inp.get("model_id") or inp.get("anthropic_model") or os.environ.get("ANTHROPIC_MODEL", "")
-    )
+    model_id = inp.get("model_id") or os.environ.get("MODEL_ID", "")
     system_prompt_overrides = inp.get("system_prompt_overrides", "")
     # #1: per-repo build/lint verification commands. Empty → agent defaults to mise.
     build_command = inp.get("build_command", "")
@@ -652,7 +649,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "task_description": task_description,
         "issue_number": issue_number,
         "github_token": github_token,
-        "anthropic_model": anthropic_model,
+        "model_id": model_id,
         "max_turns": max_turns,
         "max_budget_usd": max_budget_usd,
         "aws_region": aws_region,

@@ -61,7 +61,7 @@ flowchart TB
     end
     subgraph agent[Agent container]
         SR["Step runner<br/>interprets workflow.steps in order"]
-        AG["run_agent (Claude Agent SDK loop)"]
+        AG["run_agent (Strands + Bedrock loop)"]
     end
     REQ --> RES --> PF --> HY --> SS --> SR
     SR --> AG
@@ -99,7 +99,7 @@ A workflow file has the following top-level fields. (Full machine-readable schem
 | `read_only` | boolean | – | Agent may not mutate the working tree (sets `context.read_only` for the Cedar Write/Edit hard-deny, drops `Write`/`Edit` from `allowed_tools`, and skips safety-net commit). Default `false`. |
 | `prompt` | object | ✓ | `{ template: <inline string \| registry ref>, placeholders: [...] }`. The system-prompt fragment injected into the base template. |
 | `hydration` | object | ✓ | Which context sources to assemble: any of `issue`, `pull_request`, `memory`, `attachments`, `urls`, `task_description`. Repo-less workflows omit `issue`/`pull_request`. |
-| `agent_config` | object | ✓ | Everything that shapes the SDK session: `{ tier, model?, allowed_tools, mcp_servers, cedar_policy_modules, skills, plugins, subagents, prompt_fragments }`. Asset kinds mirror the [#246](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/246) registry vocabulary. See [Agent configuration: the three planes](#agent-configuration-the-three-planes). `tier`+`allowed_tools` required; the rest optional. `skills`/`plugins`/`subagents`/`prompt_fragments` are **registry-resolved (Phase 4)** — declared now, ignored by the runner until #246. |
+| `agent_config` | object | ✓ | Everything that shapes the Strands session: `{ tier, model?, allowed_tools, mcp_servers, cedar_policy_modules, skills, plugins, subagents, prompt_fragments }`. Asset kinds mirror the [#246](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/246) registry vocabulary. See [Agent configuration: the three planes](#agent-configuration-the-three-planes). `tier`+`allowed_tools` required; the rest optional. `skills`/`plugins`/`subagents`/`prompt_fragments` are **registry-resolved (Phase 4)** — declared now, ignored by the runner until #246. |
 | `agent_config.model` | object | – | Optional preferred Bedrock model `{ id, allow_task_override? }` — see [Model selection](#model-selection). A *suggestion*, bounded by the repo Blueprint / platform allow-list and per-task budget; omit to inherit the default. |
 | `repo_config` | object | – | How this workflow relates to a **source-control repository**: `{ provider (default github), discover (default true), ignore: [claude_md\|rules\|subagents\|settings\|mcp] }`. `provider` is a VCS abstraction (see [VCS provider abstraction](#vcs-provider-abstraction)); `discover`/`ignore` gate config discovered from the cloned repo (`CLAUDE.md`, `.claude/`, `.mcp.json`). Must be `discover:false` (and `provider` is N/A) when `requires_repo:false`. |
 | `steps` | Step[] | ✓ | Ordered pipeline phases (see [Step kinds](#step-kinds)). |
@@ -119,7 +119,7 @@ Steps are the unit the runner interprets. Each has a `kind`, an optional `name`,
 |---|---|---|---|
 | `clone_repo` | deterministic | Clone + `mise trust`/`install` + initial build/lint; select branch | Forbidden when `requires_repo:false`. Replaces `setup_repo`. |
 | `hydrate_context` | deterministic | Assemble prompt from declared `hydration` sources | Mostly done orchestrator-side; this step consumes the `HydratedContext` payload. |
-| `run_agent` | agentic | The Claude Agent SDK loop with the workflow's prompt + `agent_config` | Exactly one per workflow. Today only one `run_agent` is ever called (`pipeline.py`), so this is an emergent property the schema now *promotes to an enforced constraint*; multi-agent loops are out of scope (#99). |
+| `run_agent` | agentic | The Strands loop with the workflow's prompt + `agent_config` | Exactly one per workflow. Today only one `run_agent` is ever called (`pipeline.py`), so this is an emergent property the schema now *promotes to an enforced constraint*; multi-agent loops are out of scope (#99). |
 | `verify_build` | deterministic | Run `mise run build`; gate or inform | Gating declared per step via `gate` (see below). `read_only` workflows treat result as informational. Forbidden when `requires_repo:false`. |
 | `verify_lint` | deterministic | Run `mise run lint` | Optional gate (`gate` field, see below); advisory unless declared. |
 | `ensure_pr` | deterministic | Create / push+resolve / resolve-only a PR | Strategy chosen by step config (`create` \| `push_resolve` \| `resolve`), replacing the `post_hooks.ensure_pr` task_type branch. |
@@ -150,7 +150,7 @@ agent_config:
   cedar_policy_modules: [builtin/hard_deny, builtin/soft_deny]
 repo_config:
   provider: github          # the only implemented provider today; named explicitly so multi-provider is non-breaking later
-  discover: true            # load the repo's CLAUDE.md / .claude/rules / .mcp.json and layer agent_config on top
+  discover: true            # load AGENTS.md/.agents (legacy Claude files as fallback) and .mcp.json
 required_inputs:
   one_of: [issue_number, task_description]
 steps:
@@ -226,42 +226,41 @@ def run_workflow(workflow: Workflow, config: TaskConfig, hc: HydratedContext) ->
 
 ### Step execution semantics
 
-The step runner runs inside the compute substrate, which is **not** a throwaway container: AgentCore provides persistent session storage — a per-session filesystem at `/mnt/workspace` that survives stop/resume cycles (14-day TTL, see [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute)) — and the Claude Agent SDK supports resuming a prior session by its session UUID (the runner already captures that UUID from the first `ResultMessage`). So the durability model the runner should target is **resume from where the workflow stopped**, not replay from the beginning. The runner is designed resume-aware from the start so the structured "steps" become the natural checkpoint boundaries:
+The step runner executes inside a task-isolated compute session. Durable task state and remote Git branches survive a worker failure, but the current Strands harness does not persist or resume a model transcript. A replacement worker therefore starts the model loop from turn 0. Deterministic and side-effecting steps must remain idempotent so recovery can reconcile existing work:
 
-- **Step completion is checkpointed; resume skips completed steps.** The runner records each step's outcome to a small `workflow_state.json` on the persistent mount (`/mnt/workspace`) as it goes. On resume (orchestrator re-invokes the same session, or — when shipped — a replacement worker rehydrates from the [S3-backed SDK session store](#relationship-to-portable-resume)), the runner reads that checkpoint, **skips already-completed deterministic steps** (`clone_repo` need not re-clone a populated `/workspace`; a completed `verify_build` is not re-run), and **resumes the agent loop** via the persisted SDK session UUID rather than restarting it from turn 0. This is the same property the orchestrator already relies on for session start being idempotent (pre-generated, reused session id).
+- **No transcript resume today.** `AgentResult.session_id` records the Strands agent identifier for correlation, not a portable conversation checkpoint. A stopped process cannot reconstruct in-flight model state from it.
 - **Side-effecting steps remain idempotent.** Independent of resume, `clone_repo`, `ensure_pr`, `post_review`, and `deliver_artifact` must tolerate a partial prior run (a resume can re-enter the step that was in flight when the worker died). Each documents its idempotency key — PR branch, review id, artifact S3 key = `task_id` — so re-entry reconciles rather than duplicates (today's `ensure_pr` already does this: it checks `gh pr view` before creating).
 - **`on_failure: continue` is forbidden after side effects** (validation rule 10). A failed `ensure_pr` (commits pushed, PR-create failed) must not reach a *succeeded* terminal — committed work with no PR and no compensation. `continue` is permitted only for non-side-effecting, advisory steps (e.g. an informational `verify_lint`). `skip_remaining` ends the workflow cleanly and runs terminal-outcome resolution against whatever completed; `fail` (default) is terminal `FAILED`.
-- **Granularity boundary.** Resume is *workflow-step granular on the agent side*, not a new orchestrator-side durable checkpoint per step — the orchestrator still treats the whole session as one `await-agent-completion` step, so platform invariants stay agent-external ([ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks)). What changes versus today is that the agent-side runner makes its *own* progress recoverable across a stop/resume, which today's monolithic `run_task` does not.
+- **Granularity boundary.** The orchestrator treats the whole session as one `await-agent-completion` step, so platform invariants stay agent-external ([ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks)). Recovery relies on task records and idempotent external effects rather than an SDK transcript.
 
 #### Relationship to portable resume
 
-This depends on two capabilities, one shipped-in-preview and one planned — the design assumes the first and is forward-compatible with the second:
+Portable model-session resume is not part of the current Strands integration:
 
 | Capability | Status | What the runner uses it for |
 |---|---|---|
-| Persistent session storage (`/mnt/workspace`, survives stop/resume) | Shipped (preview) — COMPUTE.md | Holds `workflow_state.json` checkpoint + the populated workspace so a resumed session skips completed work. |
-| Claude Agent SDK session resume (by session UUID) | SDK feature; UUID already captured by the runner | Resume the agent loop mid-task instead of from turn 0. |
-| S3-backed SDK session store (`task_id` ↔ session UUID, portable transcript) | **Planned** — [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) | Resume on a *different* worker (e.g. after node loss), not just the same session. The workflow checkpoint should live alongside the session transcript so the two resume together. |
+| Durable task/event state | Shipped | Reconstructs orchestration state and user-visible progress. |
+| Remote Git branch and PR | Shipped | Preserves committed coding work and supports idempotent finalization. |
+| Portable Strands transcript/checkpoint | Not implemented | Would be required to resume a replacement worker mid-turn instead of starting a new model loop. |
 
-Until the S3 session store lands, resume is bounded to what persistent session storage + same-session re-invoke provide; a total worker loss still re-runs from step 0 (mitigated by step idempotency above). When it lands, the workflow checkpoint rides with the session transcript and resume becomes worker-portable. Per-step *compensation/rollback* of completed side effects is a non-goal for this issue — called out so it is a recorded decision, not an oversight.
+A total worker loss can therefore replay deterministic setup and starts a fresh model conversation. Step idempotency and remote commits limit duplication. Per-step compensation/rollback remains a non-goal.
 
 ### Agent configuration: the three planes
 
-A Claude Agent SDK session here is shaped by more than tools — it loads **skills, plugins, subagents, rules/prompt-fragments, MCP servers, settings, and Cedar policy**. Today these arrive from two places: the agent's own code (`runner.py` resolves `allowed_tools`, `disallowed_tools`, and `setting_sources`) and the **cloned repo** (`prompt_builder.discover_project_config` reads `CLAUDE.md`, `.claude/rules/*.md`, `.claude/agents/*.md`, `.claude/settings.json`, `.mcp.json`). A workflow adds a third plane. The model is three layers, lowest-to-highest precedence — deliberately parallel to the existing platform/repo/task [override precedence](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding#override-precedence):
+A Strands session is shaped by its model, tool list, system prompt, MCP servers, and Cedar policy. These arrive from the platform harness, the workflow, and the cloned repository. Repository instructions prefer `AGENTS.md` and `.agents`; legacy `CLAUDE.md`/`.claude/rules` are loaded only when modern guidance is absent. Repository `.mcp.json` servers are loaded with Strands `MCPClient`. The model is three layers, lowest-to-highest precedence:
 
 | Plane | Source | What it carries | Precedence |
 |---|---|---|---|
 | **Blueprint** (per-repo) | `RepoConfig` (CDK) | compute, model, credentials, egress, repo Cedar extensions | lowest |
 | **Workflow** (`agent_config`, per-task-type) | the workflow file | `tier`, `allowed_tools`, `mcp_servers`, `cedar_policy_modules`, and (Phase 4) `skills`, `plugins`, `subagents`, `prompt_fragments` | middle |
-| **Repo-discovered** (`repo_config`) | the cloned repo's `.claude/` + `.mcp.json` | repo-specific rules, subagents, MCP, settings | highest (repo wins for repo-specific guidance) |
+| **Repo-discovered** (`repo_config`) | `AGENTS.md`/`.agents` (legacy fallback) + `.mcp.json` | repo-specific instructions and MCP tools | highest (repo wins for repo-specific guidance) |
 
 The mechanisms in `agent_config` map 1:1 onto the **#246 registry asset kinds** (capability/skill/plugin/mcp_server/prompt_fragment/cedar_policy_module), so a workflow is the first concrete consumer of that vocabulary. Two boundaries:
 
 - **What ships in #248 vs Phase 4.** `tier`/`allowed_tools`/`cedar_policy_modules` and *builtin* `mcp_servers` (e.g. the existing Linear server) are interpreted by the runner in Phases 1–3. `skills`, `plugins`, `subagents`, `prompt_fragments`, and `registry://` refs are **declared in the schema now but ignored by the runner until the registry (#246) can resolve them** — they are forward-declarations, not Phase-1 behavior. The schema marks each accordingly.
-- **A workflow can gate repo-discovered config.** `repo_config.discover` (default `true`) loads the repo's `.claude/`/`.mcp.json` and layers `agent_config` underneath it; `repo_config.ignore: [settings, mcp, ...]` opts out of specific sources (e.g. a locked-down workflow that refuses repo `.mcp.json`, or a knowledge workflow with `discover:false` because there's no repo). This is why repo-less workflows must set `discover:false` (validation rule).
+- **A workflow can gate repo-discovered config.** `repo_config.discover` (default `true`) controls repository instruction and MCP discovery; `repo_config.ignore` can opt out of specific legacy/schema sources. Repo-less workflows set `discover:false`.
 
-**Hard tool block (`disallowed_tools`) — not the same lever as `allowed_tools`.** Per the Agent SDK, `allowed_tools` is an **auto-approve** list; it does *not* restrict the reachable surface — a tool omitted from it falls through to `permission_mode`, and the agent runs under `bypassPermissions`, so omitted tools are simply allowed. The actual surface lock is `disallowed_tools` (removes the tool from the model's context even under bypass). `runner.py` hard-blocks the **off-session/defer vectors** — `Workflow`, `Task`, `Agent` — for every task, because a one-shot headless agent has no supervisor to await detached work: the `Workflow` tool launches a background orchestration, returns a task id, and the agent's turn ends, so the runner would finalize on the first `ResultMessage` with a placeholder while the real work runs on, detached (observed on a repo-less research task). Additionally, a **repo-less task loads no on-disk settings** (`setting_sources=[]`) — there is no cloned repo to discover config from, and this keeps a stray on-disk skill (e.g. one that spawns a `Workflow`) out of reach. Defense-in-depth: the workflow prompt also instructs the agent to finish in-session rather than defer.
-- **`subagents` does not lift the single-`run_agent` invariant.** They are SDK-internal delegations within the one agent loop, not additional top-level agent steps; multi-agent workflows remain out of scope (#99).
+**Tool reachability.** `allowed_tools` is a real construction-time allowlist in the Strands harness: `coding_tools.build_coding_tools()` exposes only enabled neutral tools, and read-only workflows remove write/edit before the `Agent` is created. There are no implicit Claude CLI tools or detached `Workflow`/`Task` tools. Multi-agent workflows remain out of scope (#99).
 
 #### Model selection
 
@@ -294,7 +293,7 @@ Scope discipline for #248: **`github` is the only implemented provider** — add
 
 ### Replacing the Cedar principal
 
-Read-only is enforced by Cedar hard-deny rules. **As of #248 Phase 2a** these key off the `context.read_only` attribute (`read_only_forbid_write`, `read_only_forbid_edit`), not a principal literal — and `read_only: true` *also* makes the runner drop `Write`/`Edit` from the SDK `allowed_tools` list. Two layers:
+Read-only is enforced by Cedar hard-deny rules. **As of #248 Phase 2a** these key off the `context.read_only` attribute (`read_only_forbid_write`, `read_only_forbid_edit`), not a principal literal — and `read_only: true` *also* makes the runner omit write/edit tools from the Strands tool list. Two layers:
 
 - **Defense in depth.** `read_only: true` makes the runner drop `Write`/`Edit` from `allowed_tools` *and* sends `context.read_only == true` on every Cedar request — closing the earlier gap where read-only was enforced only by a Cedar string-match on the principal, not by the tool list.
 - **Property-keyed enforcement (security-relevant — was precise, not hand-waved).** Read-only enforcement attaches to the *property*, not a per-task-type literal: the principal keeps the legacy `Agent::TaskAgent::"<id>"` identity scheme (audit/attribution only), while the two hard-deny rules forbid `Write`/`Edit` **whenever `context.read_only == true`**. So the deny applies uniformly to *every* read-only workflow — not just `coding/pr-review` — and there is no literal a new read-only workflow could fail to match. This was a deliberate, recorded behavior change (see [ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks) addendum 2026-06-08), gated by the `contracts/cedar-parity/` fixtures (`read-only-forbid-write`, `read-only-forbid-edit`, `read-only-false-permits-write`) run against *both* the `cedarpy` and `cedar-wasm` engines.
@@ -457,7 +456,7 @@ Where a migration deliberately changes behavior, the gate's expected output is u
 
 ## Success inference and terminal outcomes
 
-`terminal_outcomes` declares what a workflow is *expected to produce*; it does not replace the agent's deliberately-defensive success model. Today `_resolve_overall_task_status` (`pipeline.py`) keys success off the agent SDK result status plus the build gate, and explicitly refuses to infer success from PR/build presence when the SDK never emitted a `ResultMessage` (so a crashed agent that happens to have left a branch is not reported `COMPLETED`). That refusal stays. `terminal_outcomes` layers on top as the *artifact* check, not a replacement:
+`terminal_outcomes` declares what a workflow is *expected to produce*; it does not replace the agent's deliberately-defensive success model. Today `_resolve_overall_task_status` (`pipeline.py`) keys success off the harness result status plus the build gate, and explicitly refuses to infer success from PR/build presence when the Strands stream never emitted a result (so a crashed agent that happens to have left a branch is not reported `COMPLETED`). That refusal stays. `terminal_outcomes` layers on top as the *artifact* check, not a replacement:
 
 - **`pr_url` / `review_posted`** — agent status is authoritative; the terminal outcome is the artifact the orchestrator's existing finalization decision matrix (ORCHESTRATOR.md) already inspects (PR exists? commits?). No change to that matrix.
 - **`artifact` (repo-less)** — there is no PR/branch to fall back on, so success = agent status `success`/`end_turn` **and** the `deliver_artifact` step recorded a delivered artifact (S3 key present). If the agent reports success but no artifact was delivered, the task is `FAILED` (nothing produced) — the repo-less analog of "success, no commits, no PR ⇒ FAILED."

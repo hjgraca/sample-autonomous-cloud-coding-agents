@@ -525,8 +525,7 @@ def build_config(
     task_description: str = "",
     issue_number: str = "",
     github_token: str = "",
-    anthropic_model: str = "",
-    haiku_model: str = "",
+    model_id: str = "",
     max_turns: int = 10,
     max_budget_usd: float | None = None,
     aws_region: str = "",
@@ -559,15 +558,7 @@ def build_config(
     resolved_task_description = task_description or os.environ.get("TASK_DESCRIPTION", "")
     resolved_github_token = github_token or resolve_github_token()
     resolved_aws_region = aws_region or os.environ.get("AWS_REGION", "")
-    resolved_anthropic_model = anthropic_model or os.environ.get(
-        "ANTHROPIC_MODEL", "us.anthropic.claude-opus-4-8"
-    )
-    # Small/fast auxiliary model (WebFetch summarization etc.). Falls back to the
-    # deployed ANTHROPIC_DEFAULT_HAIKU_MODEL env, then the platform default. Must
-    # be an inference-profile id (us.*), not a bare model id (see runner).
-    resolved_haiku_model = haiku_model or os.environ.get(
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-    )
+    resolved_model_id = model_id or os.environ.get("MODEL_ID", "us.anthropic.claude-opus-4-8")
 
     # Resolve the workflow id (the create-task boundary already pinned it; local
     # batch runs default to the coding workflow). Required-input validation is
@@ -644,8 +635,7 @@ def build_config(
         task_description=resolved_task_description,
         github_token=resolved_github_token,
         aws_region=resolved_aws_region,
-        anthropic_model=resolved_anthropic_model,
-        haiku_model=resolved_haiku_model,
+        model_id=resolved_model_id,
         dry_run=dry_run,
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
@@ -683,7 +673,7 @@ def get_config() -> TaskConfig:
             task_description=os.environ.get("TASK_DESCRIPTION", ""),
             issue_number=os.environ.get("ISSUE_NUMBER", ""),
             github_token=os.environ.get("GITHUB_TOKEN", ""),
-            anthropic_model=os.environ.get("ANTHROPIC_MODEL", ""),
+            model_id=os.environ.get("MODEL_ID", ""),
             max_turns=int(os.environ.get("MAX_TURNS", "100")),
             max_budget_usd=float(os.environ.get("MAX_BUDGET_USD", "0")) or None,
             aws_region=os.environ.get("AWS_REGION", ""),

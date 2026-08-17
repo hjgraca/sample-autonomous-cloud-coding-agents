@@ -1,6 +1,6 @@
 # Agent Runtime
 
-The agent runtime container for ABCA. Each agent instance clones a GitHub repo, works on a task using Claude, and delivers a result — a new pull request (`new_task`), updates to an existing PR (`pr_iteration`), or structured review comments on a PR (`pr_review`). Runs as a Docker container with two modes:
+The agent runtime container for ABCA. Each agent instance clones a GitHub repo, works on a task through the Strands agent harness and Amazon Bedrock, and delivers a result — a new pull request (`new_task`), updates to an existing PR (`pr_iteration`), or structured review comments on a PR (`pr_review`). Runs as a Docker container with two modes:
 
 - **Local mode** — batch execution via `run.sh` with AgentCore-matching constraints (2 vCPU, 8 GB RAM)
 - **AgentCore mode** — FastAPI server on port 8080 with `/invocations` and `/ping` endpoints, deployable to AWS Bedrock AgentCore Runtime
@@ -119,11 +119,10 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 | `AWS_SECRET_ACCESS_KEY` | Conditional† | | Explicit keys, if you are not using CLI-based resolution |
 | `AWS_SESSION_TOKEN` | No | | For temporary credentials |
 | `AWS_PROFILE` | No | | Profile for `aws configure export-credentials` in `run.sh`, or default profile when using the `~/.aws` mount fallback |
-| `ANTHROPIC_MODEL` | No | `us.anthropic.claude-opus-4-8` | Bedrock **inference profile** ID for `InvokeModel` (see [inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html)). Must be the `us.`-prefixed profile ID, not a bare foundation-model ID — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) |
+| `MODEL_ID` | No | `us.anthropic.claude-opus-4-8` | Bedrock **inference profile** ID for the Strands `BedrockModel` (see [inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html)). Must be the `us.`-prefixed profile ID, not a bare foundation-model ID — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) |
 | `MAX_TURNS` | No | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | No | | **Local batch only** (shell env when running `entrypoint.py` directly). Range 0.01–100; agent stops when the budget is reached. For deployed AgentCore **server** mode and production tasks, set **`max_budget_usd`** on task creation (REST API, CLI `--max-budget`, or Blueprint default); the orchestrator sends it in the `/invocations` JSON body — server mode does not read `MAX_BUDGET_USD` from the environment. |
 | `DRY_RUN` | No | | Set to `1` to validate config and print the prompt without running the agent |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock **inference profile** ID for the small/fast auxiliary model — the pre-flight safety check and WebFetch summarization (see below). Set by the CDK stack (`cdk/src/stacks/agent.ts` (the runtime environment block)); the `us.` prefix is required |
 | `NUDGES_TABLE_NAME` | No | | **Phase 2.** DynamoDB table for mid-task user nudges (`<user_nudge>` XML blocks injected between turns). If unset, the agent runs without nudge support — `nudge_reader.read_pending()` returns `[]` and logs a WARN once. Set automatically by the CDK stack on both AgentCore runtimes. |
 | `JIRA_APP_ACTOR_PROXY_URL` | No | | Resolved per-task from the Jira tenant secret. Forge v2 web-trigger URL used for app-authored Jira comments and transitions. |
 | `JIRA_APP_ACTOR_SHARED_SECRET` | No | | Resolved per-task from the Jira tenant secret. HMAC key for the Forge proxy; redacted from agent diagnostics. |
@@ -133,11 +132,9 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 including non-Jira tasks, so a warm AgentCore process cannot expose one
 tenant's OAuth or Forge credential to the next task.
 
-**Bedrock model access (main model):** Configuring `ANTHROPIC_MODEL` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Always use an inference profile ID such as `us.anthropic.claude-opus-4-8`: a bare foundation-model ID cannot be invoked with on-demand throughput and Bedrock rejects it with `ValidationException`. IAM must also grant the model — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) for the full layering. If the CLI stops with a message that the model is not available on your Bedrock deployment, fix model access in the console or switch `ANTHROPIC_MODEL` to an entitled profile, then retry.
+**Bedrock model access:** Configuring `MODEL_ID` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Always use an inference profile ID such as `us.anthropic.claude-opus-4-8`: a bare foundation-model ID cannot be invoked with on-demand throughput and Bedrock rejects it with `ValidationException`. IAM must also grant the model — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) for the full layering. If the harness reports that the model is unavailable, fix model access in the console or switch `MODEL_ID` to an entitled profile, then retry.
 
-**Pre-flight check model**: Claude Code runs a quick safety verification using a small Haiku model before executing each tool command. On Bedrock, the default Haiku model ID may not be enabled in your account, causing the check to time out with *"Pre-flight check is taking longer than expected"* warnings. The agent sets `ANTHROPIC_DEFAULT_HAIKU_MODEL` to a known-available Bedrock Haiku model ID to avoid this. If you see pre-flight timeout warnings, verify that this model is enabled in your Bedrock model access settings.
-
-† You need valid Bedrock credentials in the container: export keys (Option A), let `run.sh` inject keys from the AWS CLI after `aws sso login` or similar (Option B), or mount `~/.aws` (Option C). `run.sh` also sets `CLAUDE_CODE_USE_BEDROCK=1` so Claude Code uses Bedrock.
+† You need valid Bedrock credentials in the container: export keys (Option A), let `run.sh` inject keys from the AWS CLI after `aws sso login` or similar (Option B), or mount `~/.aws` (Option C). Strands invokes Bedrock directly through the boto session returned by `aws_session.get_session()`.
 
 ### Examples
 
@@ -147,7 +144,7 @@ DRY_RUN=1 ./agent/run.sh "owner/repo" 42
 
 # Run with a specific model (overrides the us.anthropic.claude-opus-4-8 default).
 # Must be a `us.`-prefixed inference profile that IAM grants — see Model configuration.
-ANTHROPIC_MODEL="us.anthropic.claude-sonnet-4-6" ./agent/run.sh "owner/repo" 42
+MODEL_ID="us.anthropic.claude-sonnet-4-6" ./agent/run.sh "owner/repo" 42
 
 # Limit agent to 50 turns
 MAX_TURNS=50 ./agent/run.sh "owner/repo" "Add unit tests for the auth module"
@@ -194,7 +191,7 @@ Request payload (representative fields — the API orchestrator sends a fuller o
 ```
 
 - `task_id` — Correlates with DynamoDB and logs; if omitted for local experiments, the agent generates a short id.
-- `model_id` — Preferred key from the orchestrator; `anthropic_model` is also accepted.
+- `model_id` — Bedrock model or inference-profile ID selected for this task.
 - Optional platform fields (when using the full stack) include `hydrated_context`, `system_prompt_overrides`, `prompt_version`, and `memory_id`.
 
 All fields in `input` fall back to container environment variables when omitted. Secrets like `GITHUB_TOKEN` should be set as runtime environment variables via the CDK stack — not sent in the payload, since AgentCore logs the full request payload in plain text.
@@ -329,13 +326,13 @@ The agent pipeline (shared by both modes). Behavior varies by task type (`new_ta
 2. **Context hydration** — fetches the GitHub issue (title, body, comments) if an issue number is provided; for `pr_iteration` and `pr_review`, fetches PR context (diff, description, review comments)
 3. **Prompt assembly** — combines the system prompt (behavioral contract, selected by task type from `prompts/`) with the issue/PR context and task description
 4. **Deterministic pre-hooks** — clones repo, creates or checks out branch, configures git auth, runs `mise trust`, `mise install`, `mise run build`, and `mise run lint`
-5. **Agent execution** — invokes the Claude Agent SDK via the `ClaudeSDKClient` class (connect/query/receive_response pattern) in unattended mode. The agent:
+5. **Agent execution** — invokes a Strands `Agent` with a `BedrockModel`, neutral filesystem/shell/web tools, optional AgentCore Gateway tools, and repo-declared MCP servers. Typed Strands lifecycle hooks enforce Cedar policy, scan outputs, publish progress, inject nudges, and stop on cancellation or budget limits. The agent:
    - Understands the codebase
    - **`new_task`**: Makes changes, runs tests and linters, commits and pushes after each unit of work, creates a pull request
    - **`pr_iteration`**: Reads review feedback, addresses it with focused changes, commits and pushes, posts a summary comment on the PR
    - **`pr_review`**: Analyzes changes read-only (no `Write` or `Edit` tools available), composes structured review findings, posts a batch review via the GitHub Reviews API
 6. **Deterministic post-hooks** — verifies `mise run build` and `mise run lint`, ensures a PR exists (creates one if the agent did not). For `pr_review`, build status is informational only and the commit/push steps are skipped.
-7. **Status resolution** — `_resolve_overall_task_status()` maps the agent outcome (success/end_turn/error/unknown) and build gate into a final task status. `agent_status=unknown` (SDK stream ended without a ResultMessage) always fails — success is never inferred from PR or build alone. If a post-hook raises after the agent ran, `_chain_prior_agent_error()` preserves the agent-layer error so it is not masked by the later exception.
+7. **Status resolution** — `_resolve_overall_task_status()` maps the agent outcome (success/end_turn/error/unknown) and build gate into a final task status. A Strands stream that ends without a result always fails — success is never inferred from PR or build alone. If a post-hook raises after the agent ran, `_chain_prior_agent_error()` preserves the agent-layer error so it is not masked by the later exception.
 8. **Metrics** — returns duration, disk usage, turn count, cost, and PR URL
 
 ## Metrics
@@ -384,9 +381,9 @@ docker images bgagent-local --format "{{.Size}}"
 
 ```
 agent/
-├── Dockerfile           Python 3.13 + Node.js 20 + Claude Code CLI + git + gh + mise (default platform linux/arm64)
+├── Dockerfile           Python 3.13 + Node.js 24 + git + gh + mise (default platform linux/arm64)
 ├── .dockerignore
-├── pyproject.toml       App dependencies (claude-agent-sdk, FastAPI, boto3, OpenTelemetry distro, MCP, cedarpy, …)
+├── pyproject.toml       App dependencies (strands-agents, FastAPI, boto3, OpenTelemetry distro, MCP, cedarpy, …)
 ├── uv.lock              Locked deps for reproducible `uv sync` in the image
 ├── mise.toml            Tool versions / tasks used when the target repo relies on mise
 ├── src/                 Agent source modules (pythonpath configured in pyproject.toml)
@@ -395,10 +392,16 @@ agent/
 │   ├── config.py        Configuration: build_config(), get_config(), resolve_github_token(), resolve_linear_api_token(); resolves the pinned workflow (resolved_workflow / ids like coding/new-task-v1) and validates required inputs per the workflow's requires_repo / read_only / is_pr_workflow (replaced TaskType in #248)
 │   ├── models.py        Pydantic data models (TaskConfig, RepoSetup, AgentResult, TaskResult, HydratedContext, AttachmentConfig, etc.). TaskConfig carries the workflow fields (resolved_workflow, policy_principal, read_only, allowed_tools, requires_repo, is_pr_workflow) that replaced the former TaskType enum (#248)
 │   ├── pipeline.py      Top-level pipeline: main() CLI entry, run_task() orchestration, status resolution, error chaining
-│   ├── runner.py        Agent runner: run_agent() — ClaudeSDKClient connect/query/receive_response
+│   ├── runner.py        Provider-neutral run_agent() entry point and harness request assembly
+│   ├── harness.py       Provider-neutral harness protocol and request model
+│   ├── strands_harness.py Strands Agent/Bedrock execution, MCP loading, and result mapping
+│   ├── strands_hooks.py Strands lifecycle hooks for policy, progress, interaction, and budgets
+│   ├── coding_tools.py  Repo-rooted shell, file, search, glob, and web tools
+│   ├── model_pricing.py Local Bedrock price table used for estimates and budget enforcement
+│   ├── repo_instructions.py AGENTS.md/.agents discovery with legacy fallback
 │   ├── context.py       Context hydration: fetch_github_issue(), assemble_prompt() (local/dry-run only)
 │   ├── prompt_builder.py System prompt assembly + memory context, repo config scanning
-│   ├── hooks.py         PreToolUse hook callback for Cedar policy enforcement (Claude Agent SDK hooks)
+│   ├── hooks.py         Runtime-neutral policy/output/interaction hook logic used by Strands adapters
 │   ├── policy.py        Cedar policy engine — in-process cedarpy evaluation, fail-closed, deny-list model
 │   ├── post_hooks.py    Deterministic post-hooks: ensure_committed, ensure_pushed, ensure_pr, verify_build, verify_lint
 │   ├── repo.py          Repository setup: clone, branch, git auth, mise trust/install/build/lint
@@ -417,7 +420,7 @@ agent/
 │       ├── default_agent.py Repo-less prompt for default/agent-v1 (no git/branch/PR; deliverable is the final message)
 │       └── web_research.py  Repo-less research prompt for knowledge/web-research-v1 (WebFetch sourcing, structured cited answer)
 ├── scripts/diagnostics/ Optional ops diagnostics (not bundled in the production image)
-│   ├── test_sdk_smoke.py        Minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)
+│   ├── test_sdk_smoke.py        Minimal Strands → Bedrock smoke test
 │   └── test_subprocess_threading.py  Subprocess-in-background-thread verification
 ├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version trailers on commits)
 ├── run.sh               Build + run helper for local/server mode with AgentCore constraints

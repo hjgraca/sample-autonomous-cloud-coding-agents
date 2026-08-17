@@ -260,7 +260,7 @@ if "accessToken" not in resp:
         "authorization_url": resp["authorizationUrl"],
         "session_uri": resp["sessionUri"],
     }
-# Step 3: run the claude-agent-sdk loop, binding the downstream call as a tool
+# Step 3: run the Strands agent loop, binding the downstream call as a tool
 ```
 
 For the M2M variant, swap step 1 for `identity.get_workload_access_token(workloadName)` (no JWT, no user) and set step 2's `oauth2Flow="M2M"`.

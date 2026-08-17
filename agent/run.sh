@@ -30,7 +30,7 @@ Environment variables (required):
   AWS_REGION        AWS region for Bedrock (e.g., us-east-1)
 
 Environment variables (optional):
-  ANTHROPIC_MODEL   Model to use (unset: defer to the agent runtime default)
+  MODEL_ID          Bedrock model/inference profile (unset: runtime default)
   DRY_RUN           Set to 1 to validate config and print prompt without running the agent
   MAX_TURNS         Max agent turns (default: 100)
 
@@ -202,7 +202,6 @@ DOCKER_ARGS=(
     --name "$CONTAINER_NAME"
     --cpus=2
     --memory=8g
-    -e "CLAUDE_CODE_USE_BEDROCK=1"
     -e "AWS_REGION=${AWS_REGION}"
     -e "GITHUB_TOKEN=${GITHUB_TOKEN}"
 )
@@ -213,7 +212,7 @@ DOCKER_ARGS=(
 # Optional env vars. Pass each through only when the caller actually set it, so an
 # unset variable leaves the agent runtime's own default (agent/src/config.py) intact
 # instead of being shadowed by a second default defined here.
-[[ -n "${ANTHROPIC_MODEL:-}" ]] && DOCKER_ARGS+=(-e "ANTHROPIC_MODEL=${ANTHROPIC_MODEL}")
+[[ -n "${MODEL_ID:-}" ]] && DOCKER_ARGS+=(-e "MODEL_ID=${MODEL_ID}")
 [[ -n "${ISSUE_NUMBER}" ]] && DOCKER_ARGS+=(-e "ISSUE_NUMBER=${ISSUE_NUMBER}")
 [[ -n "${TASK_DESCRIPTION}" ]] && DOCKER_ARGS+=(-e "TASK_DESCRIPTION=${TASK_DESCRIPTION}")
 [[ -n "${DRY_RUN:-}" ]] && DOCKER_ARGS+=(-e "DRY_RUN=${DRY_RUN}")
